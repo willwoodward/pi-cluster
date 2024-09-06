@@ -6,6 +6,10 @@ def main():
     if len(sys.argv) == 1:
         print("Executed")
 
+    # cluster init
+    elif sys.argv[1] == "init":
+        pass
+
     # cluster online
     elif sys.argv[1] == "online":
         # Check to see if the nodes in the cluster are online
