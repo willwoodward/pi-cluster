@@ -1,0 +1,6 @@
+[plugins."io.containerd.grpc.v1.cri".registry]
+  [plugins."io.containerd.grpc.v1.cri".registry.mirrors]
+    [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost"]
+      endpoint = ["http://localhost:5000"]
+  [plugins."io.containerd.grpc.v1.cri".registry.configs."localhost:5000".tls]
+    insecure_skip_verify = true

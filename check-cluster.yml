@@ -1,0 +1,11 @@
+
+- name: Check if hosts are online
+  hosts: all
+  gather_facts: no
+  tasks:
+    - name: Check if node is reachable on port 22
+      wait_for:
+        port: 22
+        state: started
+      register: result
+      ignore_errors: yes

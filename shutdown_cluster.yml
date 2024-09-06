@@ -1,0 +1,31 @@
+- name: Shut down Raspberry Pi cluster and check status
+  hosts: all
+  become: yes
+  tasks:
+    - name: Check if node is reachable
+      wait_for:
+        port: 22
+        state: started
+        timeout: 10
+      register: node_status
+
+    - name: Report status if node is reachable
+      debug:
+        msg: "Node {{ inventory_hostname }} is reachable."
+      when: node_status.state == 'started'
+
+    - name: Shut down the system
+      command: /sbin/shutdown -h now
+      when: node_status.state == 'started'
+      register: shutdown_result
+      ignore_errors: yes
+
+    - name: Report shutdown result
+      debug:
+        msg: "Shutdown on node {{ inventory_hostname }} resulted in: {{ shutdown_result }}"
+      when: shutdown_result is defined
+
+    - name: Final status check
+      local_action:
+        module: debug
+        msg: "Shutdown attempt on {{ inventory_hostname }}. Result: {{ shutdown_result | default('unknown') }}"

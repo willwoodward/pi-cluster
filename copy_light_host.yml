@@ -1,0 +1,14 @@
+- name: Copy file to remote nodes
+  hosts: all
+  tasks:
+    - name: Create directory /home/pi/Documents/light if it doesn't exist
+      file:
+        path: /home/pi/Documents/light
+        state: directory
+        mode: '0755'
+
+    - name: Copy serial_control_host.py to /home/pi/Documents/light/
+      copy:
+        src: serial_control_host.py
+        dest: /home/pi/Documents/light/serial_control_host.py
+        mode: '0644'

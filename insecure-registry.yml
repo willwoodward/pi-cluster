@@ -1,0 +1,39 @@
+- name: Configure containerd on all nodes
+  hosts: all
+  become: yes
+  tasks:
+    - name: Ensure containerd is installed
+      apt:
+        name: containerd
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Ensure containerd is installed
+      yum:
+        name: containerd
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Create containerd configuration directory
+      file:
+        path: /etc/containerd
+        state: directory
+
+    - name: Generate containerd configuration file
+      template:
+        src: containerd-config.toml.j2
+        dest: /etc/containerd/config.toml
+      notify:
+        - Restart containerd
+
+    - name: Ensure containerd is started and enabled
+      systemd:
+        name: containerd
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: Restart containerd
+      systemd:
+        name: containerd
+        state: restarted

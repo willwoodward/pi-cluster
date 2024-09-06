@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pod-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pod-operator
+  template:
+    metadata:
+      labels:
+        app: pod-operator
+    spec:
+      serviceAccountName: kopf-operator
+      containers:
+      - name: pod-operator-container
+        image: localhost:30007/pod-operator:latest
+        imagePullPolicy: Always
