@@ -6,9 +6,16 @@ def main():
     if len(sys.argv) == 1:
         print("Executed")
 
+    # cluster online
     elif sys.argv[1] == "online":
-        # Execute the command: ansible-playbook -i inventory.ini check-cluster.yml
+        # Check to see if the nodes in the cluster are online
         command = ["ansible-playbook", "-i", "inventory.ini", "scripts/check-cluster.yml"]
+        subprocess.run(command)
+    
+    # cluster shutdown
+    elif sys.argv[1] == "shutdown":
+        # Shutdown the cluster
+        command = ["ansible-playbook", "-i", "inventory.ini", "scripts/shutdown-cluster.yml"]
         subprocess.run(command)
 
 if __name__ == "__main__":
