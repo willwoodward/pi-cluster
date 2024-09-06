@@ -1,5 +1,6 @@
 import sys
 import subprocess
+import json
 
 def main():
     # cluster
@@ -7,8 +8,7 @@ def main():
         print("Executed")
 
     # cluster init
-    elif sys.argv[1] == "init":
-        pass
+    elif sys.argv[1] == "init": init()
 
     # cluster online
     elif sys.argv[1] == "online":
@@ -21,6 +21,27 @@ def main():
         # Shutdown the cluster
         command = ["ansible-playbook", "-i", "inventory.ini", "scripts/shutdown-cluster.yml"]
         subprocess.run(command)
+
+def init():
+    # Data to be written
+    nodes = {
+        "master": {
+            "username": "",
+            "hostname": ""
+        },
+        "workers": [
+            {
+                "username": "",
+                "hostname": ""
+            },
+        ]
+    }
+    
+    # Serializing json
+    json_object = json.dumps(nodes, indent=4)
+    
+    with open("cluster-config.json", "w") as outfile:
+        outfile.write(json_object)
 
 if __name__ == "__main__":
     main()
