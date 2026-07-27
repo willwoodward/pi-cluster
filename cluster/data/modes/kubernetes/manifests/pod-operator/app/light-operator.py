@@ -1,43 +1,40 @@
 import kopf
 import kubernetes.client
 from kubernetes import config
+import os
 import subprocess
 import time
 
-# Load the Kubernetes configuration (usually from ~/.kube/config)
+# Load the in-cluster Kubernetes configuration.
 config.load_incluster_config()
 
 # Create a Kubernetes API client
 v1 = kubernetes.client.CoreV1Api()
 
+SSH_KEY = os.environ.get("SSH_KEY_PATH", "/root/.ssh/id_rsa")
+SSH_USER = os.environ.get("NODE_SSH_USER", "pi")
+LIGHT_SCRIPT = os.environ.get(
+    "LIGHT_SCRIPT_PATH", "/home/pi/Documents/light/serial_control_host.py"
+)
+
+
+def _ssh(ip_address, color):
+    return [
+        "ssh",
+        "-i", SSH_KEY,
+        "-o", "StrictHostKeyChecking=no",
+        f"{SSH_USER}@{ip_address}",
+        f"python3 {LIGHT_SCRIPT} {color}",
+    ]
+
+
 def flash(ip_address, command):
     try:
-        # SSH command to set color to white
-        ssh_command_white = [
-            "ssh",
-            "-i", "/root/.ssh/id_rsa",
-            "-o", "StrictHostKeyChecking=no",
-            f"pi@{ip_address}",
-            f"python3 /home/pi/Documents/light/serial_control_host.py {command}"
-        ]
-        
-        # SSH command to set color to black
-        ssh_command_black = [
-            "ssh",
-            "-i", "/root/.ssh/id_rsa",
-            "-o", "StrictHostKeyChecking=no",
-            f"pi@{ip_address}",
-            f"python3 /home/pi/Documents/light/serial_control_host.py black"
-        ]
-        
-        # Set the color to white on the remote host
-        subprocess.run(ssh_command_white, check=True)
-        
+        # Set the LEDs to the given colour, then clear them again.
+        subprocess.run(_ssh(ip_address, command), check=True)
         time.sleep(0.5)
-        
-        # Set the color to black on the remote host
-        subprocess.run(ssh_command_black, check=True)
-                
+        subprocess.run(_ssh(ip_address, "black"), check=True)
+
     except subprocess.CalledProcessError as e:
         print(f"An error occurred while running the SSH command: {e}")
     except Exception as e:

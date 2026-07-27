@@ -8,6 +8,6 @@ spec:
   accessModes:
     - ReadWriteMany
   nfs:
-    path: /mnt/nfs/registry
-    server: 192.168.2.209
+    path: {{ registry_path }}
+    server: {{ nfs_server }}
   persistentVolumeReclaimPolicy: Retain

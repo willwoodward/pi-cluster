@@ -17,3 +17,20 @@ spec:
       - name: pod-operator-container
         image: localhost:30007/pod-operator:latest
         imagePullPolicy: Always
+        env:
+        - name: NODE_SSH_USER
+          value: "pi"
+        - name: LIGHT_SCRIPT_PATH
+          value: "/home/pi/Documents/light/serial_control_host.py"
+        volumeMounts:
+        - name: ssh-key
+          mountPath: /root/.ssh
+          readOnly: true
+      volumes:
+      - name: ssh-key
+        secret:
+          secretName: pod-operator-ssh-key
+          defaultMode: 0400
+          items:
+          - key: id_rsa
+            path: id_rsa

@@ -1,0 +1,23 @@
+- name: Deploy the registry and example workloads
+  hosts: master
+  become: yes
+  vars:
+    manifest_dir: /tmp/pi-cluster-manifests
+    nfs_server: "{{ hostvars[groups['storage'][0]]['ansible_host'] }}"
+    registry_path: "{{ storage_mount }}/registry"
+  tasks:
+    - name: Copy manifests to the control-plane node
+      copy:
+        src: manifests/
+        dest: "{{ manifest_dir }}/"
+
+    - name: Render the registry PersistentVolume for this cluster's NFS export
+      template:
+        src: manifests/registry/registry-pv.yml.j2
+        dest: "{{ manifest_dir }}/registry/registry-pv.yml"
+
+    - name: Apply the private registry
+      command: k3s kubectl apply -f {{ manifest_dir }}/registry/
+
+    - name: Apply the nginx example
+      command: k3s kubectl apply -f {{ manifest_dir }}/example-nginx/

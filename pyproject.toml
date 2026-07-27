@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pi-cluster"
+version = "0.1.0"
+description = "Set up and explore a Raspberry Pi cluster as a hands-on distributed-systems learning tool."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "Will Woodward", email = "will@woodwardweb.com" }]
+keywords = ["raspberry-pi", "kubernetes", "k3s", "cluster", "ansible", "distributed-systems"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: System :: Clustering",
+]
+dependencies = [
+    "ansible-core>=2.15",
+]
+
+[project.urls]
+Homepage = "https://github.com/willwoodward/pi-cluster"
+Source = "https://github.com/willwoodward/pi-cluster"
+
+[project.scripts]
+cluster = "cluster.cli:main"
+
+[tool.setuptools]
+packages = ["cluster"]
+
+[tool.setuptools.package-data]
+cluster = [
+    "data/**/*.yml",
+    "data/**/*.yaml",
+    "data/**/*.j2",
+    "data/**/*.py",
+    "data/**/*.txt",
+    "data/**/Dockerfile",
+]
+
+[tool.setuptools.exclude-package-data]
+cluster = ["data/**/id_rsa", "data/**/id_rsa.pub"]

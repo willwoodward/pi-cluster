@@ -1,3 +1,15 @@
+# Generated per-cluster (contain your node hostnames / paths)
 inventory.ini
+cluster-config.json
+
+# SSH keys and kubeconfig — never commit these
 config
-id_rsa
+id_rsa*
+pi-cluster
+pi-cluster.pub
+
+# Python
+__pycache__/
+*.egg-info/
+build/
+dist/

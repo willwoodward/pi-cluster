@@ -1,14 +1,16 @@
-- name: Copy file to remote nodes
+- name: Install the LED serial-control script on every node
   hosts: all
+  vars:
+    light_dir: "/home/{{ ansible_user }}/Documents/light"
   tasks:
-    - name: Create directory /home/pi/Documents/light if it doesn't exist
+    - name: Ensure the light directory exists
       file:
-        path: /home/pi/Documents/light
+        path: "{{ light_dir }}"
         state: directory
-        mode: '0755'
+        mode: "0755"
 
-    - name: Copy serial_control_host.py to /home/pi/Documents/light/
+    - name: Copy serial_control_host.py to the node
       copy:
-        src: serial_control_host.py
-        dest: /home/pi/Documents/light/serial_control_host.py
-        mode: '0644'
+        src: lights/serial_control_host.py
+        dest: "{{ light_dir }}/serial_control_host.py"
+        mode: "0644"

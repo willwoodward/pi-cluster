@@ -1,15 +1,16 @@
----
-- name: Configure k3s to use an insecure Docker registry
+- name: Point k3s at the in-cluster registry mirror
   hosts: all
   become: yes
+  vars:
+    k3s_service: "{{ 'k3s' if inventory_hostname in groups['master'] else 'k3s-agent' }}"
   tasks:
-    - name: Ensure containerd configuration directory exists
+    - name: Ensure the k3s config directory exists
       file:
         path: /etc/rancher/k3s
         state: directory
-        mode: '0755'
+        mode: "0755"
 
-    - name: Create or update containerd registries configuration
+    - name: Write the registry mirror configuration
       copy:
         dest: /etc/rancher/k3s/registries.yaml
         content: |
@@ -22,6 +23,6 @@
   handlers:
     - name: Restart k3s
       systemd:
-        name: k3s
+        name: "{{ k3s_service }}"
         state: restarted
         enabled: yes

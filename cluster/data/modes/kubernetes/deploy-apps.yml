@@ -1,0 +1,76 @@
+- name: Build and roll out the LED operator and Flask example
+  hosts: master
+  become: yes
+  vars:
+    manifest_dir: /tmp/pi-cluster-manifests
+    registry: localhost:30007
+    operator_dir: "{{ manifest_dir }}/pod-operator"
+    flask_dir: "{{ manifest_dir }}/example-flask-api"
+  tasks:
+    - name: Copy manifests and build contexts to the control-plane
+      copy:
+        src: manifests/
+        dest: "{{ manifest_dir }}/"
+
+    - name: Install Docker (used only to build the images)
+      apt:
+        name: docker.io
+        state: present
+        update_cache: yes
+
+    - name: Allow pushing to the insecure in-cluster registry
+      copy:
+        dest: /etc/docker/daemon.json
+        content: |
+          { "insecure-registries": ["{{ registry }}"] }
+      notify: Restart docker
+
+    - name: Apply the Docker daemon config now
+      meta: flush_handlers
+
+    - name: Build and push the pod-operator image
+      shell: |
+        docker build -t {{ registry }}/pod-operator:latest {{ operator_dir }}/app
+        docker push {{ registry }}/pod-operator:latest
+
+    - name: Build and push the Flask example image
+      shell: |
+        docker build -t {{ registry }}/demo-flask:latest {{ flask_dir }}/app
+        docker push {{ registry }}/demo-flask:latest
+
+    - name: Copy the cluster SSH key to the node
+      copy:
+        src: "{{ ssh_private_key }}"
+        dest: /tmp/pi-cluster-id
+        mode: "0600"
+
+    - name: Create (or update) the operator SSH-key Secret
+      shell: |
+        k3s kubectl create secret generic pod-operator-ssh-key \
+          --from-file=id_rsa=/tmp/pi-cluster-id \
+          --dry-run=client -o yaml | k3s kubectl apply -f -
+
+    - name: Remove the temporary key from the node
+      file:
+        path: /tmp/pi-cluster-id
+        state: absent
+
+    - name: Apply the operator RBAC and deployment
+      command: >
+        k3s kubectl apply
+        -f {{ operator_dir }}/kopf-service-account.yml
+        -f {{ operator_dir }}/kopf-clusterrole.yml
+        -f {{ operator_dir }}/kopf-clusterrole-binding.yml
+        -f {{ operator_dir }}/light-operator.yml
+
+    - name: Apply the Flask example
+      command: >
+        k3s kubectl apply
+        -f {{ flask_dir }}/flask-example-pod.yml
+        -f {{ flask_dir }}/flask-svc.yml
+
+  handlers:
+    - name: Restart docker
+      systemd:
+        name: docker
+        state: restarted

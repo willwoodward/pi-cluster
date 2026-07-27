@@ -1,0 +1,36 @@
+- name: Export the SSD over NFS from the storage node
+  hosts: storage
+  become: yes
+  vars:
+    registry_path: "{{ storage_mount }}/registry"
+  tasks:
+    - name: Install the NFS server
+      apt:
+        name: nfs-kernel-server
+        state: present
+        update_cache: yes
+
+    - name: Mount the SSD at the storage mount point
+      mount:
+        path: "{{ storage_mount }}"
+        src: "{{ storage_device }}"
+        fstype: ext4
+        state: mounted
+      ignore_errors: yes
+
+    - name: Create the registry export directory
+      file:
+        path: "{{ registry_path }}"
+        state: directory
+        mode: "0777"
+
+    - name: Export the registry directory to the cluster subnet
+      lineinfile:
+        path: /etc/exports
+        line: "{{ registry_path }} *(rw,sync,no_subtree_check,no_root_squash)"
+        create: yes
+      notify: Reload NFS exports
+
+  handlers:
+    - name: Reload NFS exports
+      command: exportfs -ra

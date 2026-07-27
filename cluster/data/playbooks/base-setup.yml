@@ -1,0 +1,21 @@
+- name: Base setup for all cluster nodes
+  hosts: all
+  become: yes
+  tasks:
+    - name: Set the hostname to the inventory name
+      hostname:
+        name: "{{ inventory_hostname }}"
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+
+    - name: Install common packages
+      apt:
+        name:
+          - curl
+          - nfs-common
+        state: present
+      when: ansible_os_family == "Debian"
