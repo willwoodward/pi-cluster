@@ -1,41 +1,21 @@
 # Build the demo images on the control-plane (so they're ARM), push them to the
 # in-cluster registry, and roll out the LED operator and the Flask example.
-# Images are built with buildah: no daemon, and it leaves k3s's iptables alone.
-- name: Build and roll out the LED operator and Flask example
+# The CLI packs the image folders listed in the mode's `demo_images`.
+- name: Build the demo images
+  ansible.builtin.import_playbook: ../../apps/build.yml
+
+- name: Roll out the LED operator and Flask example
   hosts: control_plane
   become: true
   gather_facts: false
   vars:
     manifest_dir: /var/lib/pi-cluster/manifests
-    registry: localhost:30007
-    buildah: buildah --root /var/lib/pi-cluster/containers --runroot /run/pi-cluster-containers
-    images:
-      - { name: pod-operator, context: pod-operator/app }
-      - { name: demo-flask, context: example-flask-api/app }
   tasks:
-    - name: Install buildah
-      ansible.builtin.include_tasks: "{{ pi_cluster_data }}/tasks/apt-install.yml"
-      vars:
-        packages: [buildah]
-        component: kubernetes
-
-    - name: Copy the manifests and build contexts
+    - name: Copy the manifests
       ansible.builtin.copy:
         src: "{{ pi_cluster_data }}/modes/kubernetes/manifests/"
         dest: "{{ manifest_dir }}/"
         mode: preserve
-
-    - name: Build and push the images
-      ansible.builtin.shell: |
-        set -euo pipefail
-        {{ buildah }} bud --layers -t {{ registry }}/{{ item.name }}:latest {{ manifest_dir }}/{{ item.context }}
-        {{ buildah }} push --tls-verify=false {{ registry }}/{{ item.name }}:latest
-      args:
-        executable: /bin/bash
-      loop: "{{ images }}"
-      loop_control:
-        label: "{{ item.name }}"
-      changed_when: true
 
     - name: Render the operator manifest
       ansible.builtin.template:

@@ -1,0 +1,49 @@
+# Build one image on the control-plane and push it to the in-cluster registry.
+# Vars: image {name, tag, archive (a .tar.gz of the build folder on the
+# machine running `cluster`)}, force_build (rebuild even if the tag exists).
+- name: "{{ image.name }}: is {{ image.tag }} already in the registry?"
+  ansible.builtin.uri:
+    url: "http://localhost:30007/v2/{{ image.name }}/manifests/{{ image.tag }}"
+    method: HEAD
+    headers:
+      Accept: >-
+        application/vnd.oci.image.index.v1+json,
+        application/vnd.oci.image.manifest.v1+json,
+        application/vnd.docker.distribution.manifest.list.v2+json,
+        application/vnd.docker.distribution.manifest.v2+json
+    status_code: [200, 404]
+  register: pi_cluster_existing
+
+- name: "{{ image.name }}: build and push {{ image.tag }}"
+  when: pi_cluster_existing.status != 200 or (force_build | default(false) | bool)
+  vars:
+    build_dir: "/var/lib/pi-cluster/build/{{ image.name }}"
+    buildah: buildah --root /var/lib/pi-cluster/containers --runroot /run/pi-cluster-containers
+    ref: "localhost:30007/{{ image.name }}"
+  block:
+    - name: "{{ image.name }}: clear the old build folder"
+      ansible.builtin.file:
+        path: "{{ build_dir }}"
+        state: absent
+
+    - name: "{{ image.name }}: create the build folder"
+      ansible.builtin.file:
+        path: "{{ build_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: "{{ image.name }}: copy the build files over"
+      ansible.builtin.unarchive:
+        src: "{{ image.archive }}"
+        dest: "{{ build_dir }}"
+
+    - name: "{{ image.name }}: build and push (tagged {{ image.tag }} and latest)"
+      ansible.builtin.shell: |
+        set -euo pipefail
+        {{ buildah }} bud --layers -t {{ ref }}:{{ image.tag }} {{ build_dir }}
+        {{ buildah }} tag {{ ref }}:{{ image.tag }} {{ ref }}:latest
+        {{ buildah }} push --tls-verify=false {{ ref }}:{{ image.tag }}
+        {{ buildah }} push --tls-verify=false {{ ref }}:latest
+      args:
+        executable: /bin/bash
+      changed_when: true

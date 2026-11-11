@@ -1,0 +1,20 @@
+# Remove apps. Vars: app_names (list; ["*"] = every app pi-cluster deployed).
+- name: Remove apps from k3s
+  hosts: control_plane
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Delete their Deployments and Services
+      ansible.builtin.command: >
+        k3s kubectl delete deployment,service --ignore-not-found
+        -l {{ 'app.kubernetes.io/managed-by=pi-cluster' if item == '*' else
+              'app.kubernetes.io/name=' ~ item ~ ',app.kubernetes.io/managed-by=pi-cluster' }}
+      loop: "{{ app_names }}"
+      register: deleted
+      changed_when: "'deleted' in deleted.stdout"
+
+    - name: Delete their manifests
+      ansible.builtin.shell: rm -fv /var/lib/pi-cluster/apps/{{ item }}.json
+      loop: "{{ app_names }}"
+      register: removed
+      changed_when: removed.stdout | length > 0

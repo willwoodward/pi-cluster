@@ -1,4 +1,11 @@
-"""``cluster.toml``: deploy your own binaries to the nodes as systemd services.
+"""``cluster.toml``: run your own things on the cluster without wiring them up by hand.
+
+Two kinds of workload, driven by the same ``cluster deploy / ps / logs / undeploy``:
+
+- ``[services.<name>]`` — a binary run under systemd on bare nodes (any mode).
+- ``[apps.<name>]`` — a container on k3s (kubernetes mode). pi-cluster builds
+  the image on the control-plane and generates the Deployment and Service, so
+  you don't need kubectl. (For hand-written YAML, use kubectl directly.)
 
 A project (say, a Rust repo) describes its services::
 
@@ -15,10 +22,18 @@ Each service is installed to ``/opt/pi-cluster/<name>/`` and run by the unit
 ``pi-cluster-<name>.service``. Values in ``args`` and ``env`` can use
 ``{{ control_plane }}``, ``{{ control_plane_name }}``, ``{{ node_name }}`` and
 ``{{ node_address }}``, filled in per node.
+
+And apps::
+
+    [apps.web]
+    build = "./web"          # a folder with a Dockerfile; or image = "nginx:stable"
+    replicas = 3
+    port = 8080              # exposed on every node through a NodePort
 """
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from dataclasses import dataclass, field
@@ -43,6 +58,9 @@ _USER_RE = re.compile(r"^[a-z_][a-z0-9_-]*$")
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-z_]+)\s*\}\}")
 
 _SERVICE_KEYS = {"binary", "on", "args", "env", "user", "groups", "files", "restart"}
+_APP_KEYS = {"build", "image", "replicas", "port", "node_port", "env", "args"}
+
+MANAGED_BY = "app.kubernetes.io/managed-by=pi-cluster"
 
 
 @dataclass
@@ -67,21 +85,41 @@ class Service:
 
 
 @dataclass
+class App:
+    name: str
+    build: Path | None = None  # build context (folder with a Dockerfile), absolute
+    image: str | None = None  # or a ready-made image, e.g. "nginx:stable-alpine"
+    replicas: int = 1
+    port: int | None = None  # container port; exposed through a NodePort Service
+    node_port: int | None = None  # pin the NodePort (30000-32767); default: k3s picks
+    env: dict[str, str] = field(default_factory=dict)
+    args: list[str] = field(default_factory=list)
+
+
+@dataclass
 class Project:
     root: Path
     build_command: str | None
     services: dict[str, Service]
+    apps: dict[str, App] = field(default_factory=dict)
 
-    def select(self, names: list[str]) -> list[Service]:
+    @property
+    def names(self) -> list[str]:
+        return [*self.services, *self.apps]
+
+    def select(self, names: list[str]) -> tuple[list[Service], list[App]]:
         if not names:
-            return list(self.services.values())
-        unknown = [n for n in names if n not in self.services]
+            return list(self.services.values()), list(self.apps.values())
+        unknown = [n for n in names if n not in self.services and n not in self.apps]
         if unknown:
             raise ValueError(
-                f"No service called {', '.join(unknown)} in {PROJECT_FILENAME}. "
-                f"Services: {', '.join(self.services) or '(none)'}."
+                f"Nothing called {', '.join(unknown)} in {PROJECT_FILENAME}. "
+                f"Defined: {', '.join(self.names) or '(none)'}."
             )
-        return [self.services[n] for n in names]
+        return (
+            [self.services[n] for n in names if n in self.services],
+            [self.apps[n] for n in names if n in self.apps],
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -103,10 +141,72 @@ def _str_list(value, where: str) -> list[str]:
     return list(value)
 
 
+def _parse_env(env, where: str) -> dict[str, str]:
+    if not isinstance(env, dict):
+        raise ValueError(f"{where}: `env` must be a table.")
+    clean: dict[str, str] = {}
+    for key, value in env.items():
+        if not _ENV_KEY_RE.match(key):
+            raise ValueError(f"{where}: invalid environment variable name '{key}'.")
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            raise ValueError(f"{where}: env.{key} must be a string or number.")
+        clean[key] = str(value)
+    return clean
+
+
+def _int(raw: dict, key: str, where: str, low: int, high: int) -> int | None:
+    value = raw.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+        raise ValueError(f"{where}: `{key}` must be a whole number from {low} to {high}.")
+    return value
+
+
+def _check_name(name: str, where: str) -> None:
+    # Also a valid Kubernetes object name (DNS label): no trailing dash.
+    if not SERVICE_NAME_RE.match(name) or name.endswith("-"):
+        raise ValueError(f"{where}: names must be lowercase letters, digits and dashes.")
+
+
+def _parse_app(name: str, raw: dict, root: Path) -> App:
+    where = f"[apps.{name}]"
+    _check_name(name, where)
+    if not isinstance(raw, dict):
+        raise ValueError(f"{where} must be a table.")
+    unknown = set(raw) - _APP_KEYS
+    if unknown:
+        raise ValueError(f"{where}: unknown key(s) {', '.join(sorted(unknown))}.")
+
+    build, image = raw.get("build"), raw.get("image")
+    if (build is None) == (image is None):
+        raise ValueError(f"{where}: set exactly one of `build` (a folder) or `image`.")
+    if build is not None and not isinstance(build, str):
+        raise ValueError(f"{where}: `build` must be a path to a folder with a Dockerfile.")
+    if image is not None and (not isinstance(image, str) or not image.strip()):
+        raise ValueError(f"{where}: `image` must be an image name, e.g. 'nginx:stable'.")
+
+    replicas = _int(raw, "replicas", where, 0, 100)
+    port = _int(raw, "port", where, 1, 65535)
+    node_port = _int(raw, "node_port", where, 30000, 32767)
+    if node_port is not None and port is None:
+        raise ValueError(f"{where}: `node_port` needs `port` too.")
+
+    return App(
+        name=name,
+        build=(root / build).resolve() if build else None,
+        image=image,
+        replicas=1 if replicas is None else replicas,
+        port=port,
+        node_port=node_port,
+        env=_parse_env(raw.get("env", {}), where),
+        args=_str_list(raw.get("args", []), f"{where} `args`"),
+    )
+
+
 def _parse_service(name: str, raw: dict, root: Path) -> Service:
     where = f"[services.{name}]"
-    if not SERVICE_NAME_RE.match(name):
-        raise ValueError(f"{where}: service names must be lowercase letters, digits and dashes.")
+    _check_name(name, where)
     if not isinstance(raw, dict):
         raise ValueError(f"{where} must be a table.")
     unknown = set(raw) - _SERVICE_KEYS
@@ -126,16 +226,7 @@ def _parse_service(name: str, raw: dict, root: Path) -> Service:
         if not on:
             raise ValueError(f"{where}: `on` is an empty list.")
 
-    env = raw.get("env", {})
-    if not isinstance(env, dict):
-        raise ValueError(f"{where}: `env` must be a table.")
-    clean_env: dict[str, str] = {}
-    for key, value in env.items():
-        if not _ENV_KEY_RE.match(key):
-            raise ValueError(f"{where}: invalid environment variable name '{key}'.")
-        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
-            raise ValueError(f"{where}: env.{key} must be a string or number.")
-        clean_env[key] = str(value)
+    clean_env = _parse_env(raw.get("env", {}), where)
 
     user = raw.get("user")
     if user is not None and (not isinstance(user, str) or not _USER_RE.match(user)):
@@ -181,7 +272,7 @@ def load_project(path: Path) -> Project:
     except tomllib.TOMLDecodeError as exc:
         raise ValueError(f"{path}: {exc}") from None
 
-    unknown = set(data) - {"build", "services"}
+    unknown = set(data) - {"build", "services", "apps"}
     if unknown:
         raise ValueError(f"{path}: unknown section(s) {', '.join(sorted(unknown))}.")
 
@@ -193,12 +284,19 @@ def load_project(path: Path) -> Project:
         raise ValueError(f"{path}: build.command must be a string.")
 
     raw_services = data.get("services", {})
-    if not isinstance(raw_services, dict) or not raw_services:
-        raise ValueError(f"{path}: define at least one [services.<name>] table.")
+    raw_apps = data.get("apps", {})
+    if not isinstance(raw_services, dict) or not isinstance(raw_apps, dict):
+        raise ValueError(f"{path}: [services] and [apps] must be tables.")
+    if not raw_services and not raw_apps:
+        raise ValueError(f"{path}: define at least one [services.<name>] or [apps.<name>].")
+    both = set(raw_services) & set(raw_apps)
+    if both:
+        raise ValueError(f"{path}: '{sorted(both)[0]}' is both a service and an app.")
 
     root = path.parent.resolve()
     services = {name: _parse_service(name, raw, root) for name, raw in raw_services.items()}
-    return Project(root=root, build_command=command, services=services)
+    apps = {name: _parse_app(name, raw, root) for name, raw in raw_apps.items()}
+    return Project(root=root, build_command=command, services=services, apps=apps)
 
 
 # --------------------------------------------------------------------------- #
@@ -347,3 +445,59 @@ def check_artifacts(services: list[Service]) -> None:
         for f in svc.files:
             if not f.is_file():
                 raise FileNotFoundError(f"Service '{svc.name}': file {f} not found.")
+
+
+# --------------------------------------------------------------------------- #
+# Apps -> Kubernetes objects
+# --------------------------------------------------------------------------- #
+def app_labels(name: str) -> dict[str, str]:
+    return {"app.kubernetes.io/name": name, "app.kubernetes.io/managed-by": "pi-cluster"}
+
+
+def app_selector(name: str) -> str:
+    return f"app.kubernetes.io/name={name},{MANAGED_BY}"
+
+
+def app_manifest(app: App, image: str) -> str:
+    """A Deployment (plus a NodePort Service if the app has a port), as JSON."""
+    labels = app_labels(app.name)
+    container: dict = {"name": app.name, "image": image}
+    if app.args:
+        container["args"] = app.args
+    if app.env:
+        container["env"] = [{"name": k, "value": v} for k, v in app.env.items()]
+    if app.port:
+        container["ports"] = [{"containerPort": app.port}]
+
+    items: list[dict] = [
+        {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {"name": app.name, "labels": labels},
+            "spec": {
+                "replicas": app.replicas,
+                "selector": {"matchLabels": {"app.kubernetes.io/name": app.name}},
+                "template": {
+                    "metadata": {"labels": labels},
+                    "spec": {"containers": [container]},
+                },
+            },
+        }
+    ]
+    if app.port:
+        port: dict = {"protocol": "TCP", "port": app.port, "targetPort": app.port}
+        if app.node_port:
+            port["nodePort"] = app.node_port
+        items.append(
+            {
+                "apiVersion": "v1",
+                "kind": "Service",
+                "metadata": {"name": app.name, "labels": labels},
+                "spec": {
+                    "type": "NodePort",
+                    "selector": {"app.kubernetes.io/name": app.name},
+                    "ports": [port],
+                },
+            }
+        )
+    return json.dumps({"apiVersion": "v1", "kind": "List", "items": items}, indent=2) + "\n"

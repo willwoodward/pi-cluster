@@ -22,6 +22,9 @@ ENTRY_PLAYBOOKS = sorted(
         "playbooks/reset.yml",
         "lights/install.yml",
         "services/deploy.yml",
+        "apps/build.yml",
+        "apps/apply.yml",
+        "apps/remove.yml",
         "services/remove.yml",
     }
 )

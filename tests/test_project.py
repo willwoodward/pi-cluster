@@ -1,3 +1,4 @@
+import json
 import textwrap
 
 import pytest
@@ -94,9 +95,9 @@ def test_deployment_vars_render_per_node(example, cluster):
 
 
 def test_select(example):
-    assert [s.name for s in example.select([])] == ["controller", "agent"]
-    assert [s.name for s in example.select(["agent"])] == ["agent"]
-    with pytest.raises(ValueError, match="No service called nope"):
+    assert [s.name for s in example.select([])[0]] == ["controller", "agent"]
+    assert [s.name for s in example.select(["agent"])[0]] == ["agent"]
+    with pytest.raises(ValueError, match="Nothing called nope"):
         example.select(["nope"])
 
 
@@ -124,6 +125,14 @@ def test_systemd_quoting():
         ('[services.x]\nbinary = "b"\nfiles = ["env"]\n', "both be installed"),
         ("[deploy]\n", "unknown section"),
         ('[build]\ncommand = "make"\n', "at least one"),
+        ("[apps.web]\nreplicas = 2\n", "exactly one of"),
+        ('[apps.web]\nimage = "a"\nbuild = "b"\n', "exactly one of"),
+        ('[apps.web]\nimage = "a"\nnode_port = 31000\n', "needs `port`"),
+        ('[apps.web]\nimage = "a"\nport = 99999\n', "`port` must be"),
+        ('[apps.web]\nimage = "a"\nport = 80\nnode_port = 80\n', "`node_port` must be"),
+        ('[apps.web]\nimage = "a"\nvolumes = []\n', "unknown key"),
+        ('[apps.web-]\nimage = "a"\n', "lowercase"),
+        ('[services.x]\nbinary = "b"\n[apps.x]\nimage = "a"\n', "both a service and an app"),
         ("not toml", "cluster.toml"),
     ],
 )
@@ -158,3 +167,44 @@ def test_check_artifacts_missing_binary(example, tmp_path):
     (tmp_path / "bin" / "agent").unlink()
     with pytest.raises(FileNotFoundError, match="Did the build run"):
         proj.check_artifacts([example.services["agent"]])
+
+
+def test_app_manifest(tmp_path):
+    body = """
+        [apps.web]
+        build = "web"
+        replicas = 3
+        port = 8080
+        node_port = 30500
+        env = { MODE = "demo" }
+        args = ["--verbose"]
+
+        [apps.worker]
+        image = "busybox"
+    """
+    p = proj.load_project(write_project(tmp_path, body))
+    web = json.loads(proj.app_manifest(p.apps["web"], "localhost:30007/web:abc"))
+    deployment, service = web["items"]
+    assert deployment["kind"] == "Deployment"
+    assert deployment["spec"]["replicas"] == 3
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    assert container["image"] == "localhost:30007/web:abc"
+    assert container["env"] == [{"name": "MODE", "value": "demo"}]
+    assert container["args"] == ["--verbose"]
+    assert container["ports"] == [{"containerPort": 8080}]
+    assert service["spec"]["type"] == "NodePort"
+    assert service["spec"]["ports"][0]["nodePort"] == 30500
+    assert deployment["metadata"]["labels"]["app.kubernetes.io/managed-by"] == "pi-cluster"
+
+    worker = json.loads(proj.app_manifest(p.apps["worker"], "busybox"))
+    assert [i["kind"] for i in worker["items"]] == ["Deployment"]  # no port, no Service
+
+
+def test_select_spans_services_and_apps(tmp_path):
+    body = '[services.a]\nbinary = "a"\n[apps.b]\nimage = "x"\n'
+    p = proj.load_project(write_project(tmp_path, body))
+    services, apps = p.select(["b"])
+    assert services == []
+    assert [a.name for a in apps] == ["b"]
+    with pytest.raises(ValueError, match="Nothing called c"):
+        p.select(["c"])

@@ -1,0 +1,18 @@
+# Build images on the control-plane. Vars: images (see tasks/build-image.yml).
+- name: Build container images
+  hosts: control_plane
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Install buildah
+      ansible.builtin.include_tasks: "{{ pi_cluster_data }}/tasks/apt-install.yml"
+      vars:
+        packages: [buildah]
+        component: kubernetes
+
+    - name: Build each image
+      ansible.builtin.include_tasks: "{{ pi_cluster_data }}/tasks/build-image.yml"
+      loop: "{{ images }}"
+      loop_control:
+        loop_var: image
+        label: "{{ image.name }}:{{ image.tag }}"

@@ -1,0 +1,55 @@
+# Apply generated app manifests and wait for them to roll out.
+# Vars: apps [{name, manifest (JSON), has_service}].
+- name: Deploy apps to k3s
+  hosts: control_plane
+  become: true
+  gather_facts: false
+  vars:
+    app_dir: /var/lib/pi-cluster/apps
+  tasks:
+    - name: Create the app manifest folder
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Write the manifests
+      ansible.builtin.copy:
+        content: "{{ item.manifest }}"
+        dest: "{{ app_dir }}/{{ item.name }}.json"
+        mode: "0644"
+      loop: "{{ apps }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Apply them
+      ansible.builtin.command: k3s kubectl apply -f {{ app_dir }}/{{ item.name }}.json
+      loop: "{{ apps }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: applied
+      changed_when: "' created' in applied.stdout or ' configured' in applied.stdout"
+
+    - name: Remove the Service of apps that no longer have a port
+      ansible.builtin.command: >
+        k3s kubectl delete service --ignore-not-found
+        -l app.kubernetes.io/name={{ item.name }},app.kubernetes.io/managed-by=pi-cluster
+      loop: "{{ apps | rejectattr('has_service') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: deleted
+      changed_when: "'deleted' in deleted.stdout"
+
+    - name: Wait for each app to roll out
+      ansible.builtin.shell: |
+        if ! k3s kubectl rollout status deployment/{{ item.name }} --timeout=300s; then
+          echo "--- pods"
+          k3s kubectl get pods -o wide -l app.kubernetes.io/name={{ item.name }}
+          echo "--- recent events"
+          k3s kubectl get events --sort-by=.lastTimestamp | grep -i "{{ item.name }}" | tail -15
+          exit 1
+        fi
+      loop: "{{ apps }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: false

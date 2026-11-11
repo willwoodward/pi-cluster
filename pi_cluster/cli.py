@@ -1,17 +1,26 @@
-"""The ``cluster`` command-line interface."""
+"""The ``cluster`` command-line interface.
+
+the nodes      init, apply, status, ssh, pubkey, shutdown, reset
+modes          modes, switch, and one group per mode: cluster <mode> up | down | demo | ...
+workloads      deploy, undeploy, ps, logs   (from cluster.toml)
+LEDs           lights install | flash | firmware
+"""
 
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
-from pi_cluster import __version__, remote
+from pi_cluster import __version__, images, kube, remote
 from pi_cluster import project as proj
 from pi_cluster.ansible_runner import data_path, run_playbook
+from pi_cluster.cliutil import CLIError, confirm, load_cluster, ssh_vars
 from pi_cluster.config import (
     CONTROL_PLANE,
     DEFAULT_HOSTNAME_PREFIX,
@@ -31,45 +40,19 @@ from pi_cluster.config import (
 )
 from pi_cluster.discovery import discover, is_wsl
 from pi_cluster.inventory import write_inventory
-from pi_cluster.modes import MODES, get_mode
+from pi_cluster.modes import MODES, Mode, get_mode
 from pi_cluster.ssh_keys import ensure_keypair, public_key_text
 
 DESCRIPTION = """\
 Turn a stack of Raspberry Pis into a distributed-systems lab.
 
-setup:     init, apply, status, ssh, pubkey, shutdown, reset
-modes:     modes, create, switch, destroy, demo, kubeconfig
-services:  deploy, undeploy, ps, logs   (driven by cluster.toml)
-leds:      lights install | flash | firmware
+the nodes:  init, apply, status, ssh, pubkey, shutdown, reset
+modes:      modes, switch <mode>, and per mode: cluster <mode> up | down | demo | ...
+workloads:  deploy, undeploy, ps, logs   (from cluster.toml)
+LEDs:       lights install | flash | firmware
+
+Run `cluster <command> --help` for details.
 """
-
-KUBECONFIG_DEFAULT = "~/.kube/pi-cluster.yaml"
-
-
-class CLIError(Exception):
-    """A user-facing error: printed without a traceback."""
-
-
-def _confirm(prompt: str, assume_yes: bool) -> None:
-    if assume_yes:
-        return
-    if not sys.stdin.isatty():
-        raise CLIError(f"{prompt} Re-run with --yes to confirm.")
-    answer = input(f"{prompt} [y/N] ").strip().lower()
-    if answer not in ("y", "yes"):
-        raise CLIError("Cancelled.")
-
-
-def _load() -> ClusterConfig:
-    """Load and validate the config, and regenerate the inventory from it."""
-    config = load_config()
-    config.validate()
-    write_inventory(config)
-    return config
-
-
-def _ssh_vars(config: ClusterConfig) -> dict:
-    return {"ssh_private_key": str(Path(config.ssh.private_key).expanduser())}
 
 
 # --------------------------------------------------------------------------- #
@@ -170,7 +153,7 @@ def _print_status(config: ClusterConfig, results: dict) -> None:
 
 
 def cmd_status(args: argparse.Namespace) -> None:
-    config = _load()
+    config = load_cluster()
     results = _check_reachable(config)
     _print_status(config, results)
     if not all(r["ok"] for r in results.values()):
@@ -178,7 +161,7 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 
 def cmd_apply(args: argparse.Namespace) -> None:
-    config = _load()
+    config = load_cluster()
     results = _check_reachable(config)
     down = [name for name, r in results.items() if not r["ok"]]
     if down:
@@ -186,9 +169,7 @@ def cmd_apply(args: argparse.Namespace) -> None:
         raise CLIError(f"Can't reach {', '.join(down)}; fix that before running base setup.")
     print(f"All {len(config.nodes)} node(s) reachable. Running base setup ...")
     run_playbook("playbooks/base-setup.yml")
-    print(
-        "\nBase setup done. Nodes are bare and ready: `cluster create <mode>` or `cluster deploy`."
-    )
+    print("\nBase setup done. Nodes are bare and ready: `cluster kube up` or `cluster deploy`.")
 
 
 def cmd_ssh(args: argparse.Namespace) -> None:
@@ -200,15 +181,15 @@ def cmd_ssh(args: argparse.Namespace) -> None:
 
 
 def cmd_shutdown(args: argparse.Namespace) -> None:
-    config = _load()
-    _confirm(f"Power off all {len(config.nodes)} nodes?", args.yes)
+    config = load_cluster()
+    confirm(f"Power off all {len(config.nodes)} nodes?", args.yes)
     run_playbook("playbooks/shutdown.yml")
     print("\nShutdown sent. Wait for the activity LEDs to stop before unplugging.")
 
 
 def cmd_reset(args: argparse.Namespace) -> None:
-    config = _load()
-    _confirm(
+    config = load_cluster()
+    confirm(
         "Remove everything pi-cluster installed (modes, services, LED tool, packages) "
         "and reboot every node?",
         args.yes,
@@ -226,36 +207,39 @@ def cmd_modes(args: argparse.Namespace) -> None:
     active = load_config().mode if config_exists() else None
     for mode in MODES.values():
         marker = "*" if mode.name == active else " "
-        print(f"{marker} {mode.name:<12} {mode.summary}")
-    if active is None:
-        print("\nNo mode active (nodes are bare).")
+        aliases = f" (or: {', '.join(mode.aliases)})" if mode.aliases else ""
+        print(f"{marker} {mode.name:<12} {mode.summary}{aliases}")
+    print("\nActive: " + (active or "none (nodes are bare)"))
+    print("Use `cluster <mode> up`, or `cluster switch <mode>` to replace the active one.")
 
 
-def _create(config: ClusterConfig, mode_name: str, demo: bool) -> None:
-    mode = get_mode(mode_name)
-    print(f"Creating '{mode.name}' on {len(config.nodes)} node(s) ...")
-    config.mode = mode.name  # record before running, so a failed create can be destroyed
+def _up(config: ClusterConfig, mode: Mode, demo: bool) -> None:
+    print(f"Bringing up '{mode.name}' on {len(config.nodes)} node(s) ...")
+    config.mode = mode.name  # record before running, so a failed `up` can be taken down
     save_config(config)
     for pb in mode.create_playbooks:
         print(f"\n>>> {pb}")
         run_playbook(pb)
     if demo:
-        _demo(config, mode.name)
+        _demo(config, mode)
     print(f"\n'{mode.name}' is up. {mode.next_steps}".rstrip())
 
 
-def _demo(config: ClusterConfig, mode_name: str) -> None:
-    mode = get_mode(mode_name)
+def _demo(config: ClusterConfig, mode: Mode) -> None:
     if not mode.demo_playbooks:
         raise CLIError(f"'{mode.name}' has no demo.")
-    for pb in mode.demo_playbooks:
-        print(f"\n>>> {pb}")
-        run_playbook(pb, extra_vars=_ssh_vars(config))
+    with tempfile.TemporaryDirectory(prefix="pi-cluster-demo-") as tmp:
+        extra = ssh_vars(config)
+        if mode.demo_images:
+            builds = [images.plan(n, data_path(d)) for n, d in mode.demo_images.items()]
+            extra.update(images.build_vars(builds, Path(tmp)))
+        for pb in mode.demo_playbooks:
+            print(f"\n>>> {pb}")
+            run_playbook(pb, extra_vars=extra)
 
 
-def _destroy(config: ClusterConfig, mode_name: str) -> None:
-    mode = get_mode(mode_name)
-    print(f"Destroying '{mode.name}' ...")
+def _down(config: ClusterConfig, mode: Mode) -> None:
+    print(f"Taking down '{mode.name}' ...")
     for pb in mode.destroy_playbooks:
         print(f"\n>>> {pb}")
         run_playbook(pb)
@@ -264,66 +248,48 @@ def _destroy(config: ClusterConfig, mode_name: str) -> None:
         save_config(config)
 
 
-def cmd_create(args: argparse.Namespace) -> None:
-    config = _load()
-    get_mode(args.mode)
-    if config.mode and config.mode != args.mode:
+def cmd_mode_up(args: argparse.Namespace) -> None:
+    config = load_cluster()
+    mode = get_mode(args.mode)
+    if config.mode and config.mode != mode.name:
         raise CLIError(
-            f"'{config.mode}' is active. Run `cluster switch {args.mode}` to replace it, "
-            "or `cluster destroy` first."
+            f"'{config.mode}' is active. Run `cluster switch {mode.name}` to replace it, "
+            f"or `cluster {config.mode} down` first."
         )
-    _create(config, args.mode, args.demo)
+    _up(config, mode, args.demo)
 
 
-def cmd_switch(args: argparse.Namespace) -> None:
-    config = _load()
-    get_mode(args.mode)
-    if config.mode == args.mode:
-        print(f"'{args.mode}' is already active.")
-        return
-    if config.mode:
-        _destroy(config, config.mode)
-    _create(config, args.mode, args.demo)
+def cmd_mode_down(args: argparse.Namespace) -> None:
+    config = load_cluster()
+    mode = get_mode(args.mode)
+    if config.mode and config.mode != mode.name:
+        raise CLIError(f"'{mode.name}' isn't active ('{config.mode}' is).")
+    _down(config, mode)
+    print(f"\n'{mode.name}' removed. Nodes are bare.")
 
 
-def cmd_destroy(args: argparse.Namespace) -> None:
-    config = _load()
-    name = args.mode or config.mode
-    if not name:
-        raise CLIError(
-            "No mode is active, so there's nothing to destroy. "
-            "(`cluster reset` cleans up everything pi-cluster installed.)"
-        )
-    _destroy(config, name)
-    print(f"\n'{name}' removed. Nodes are bare.")
-
-
-def cmd_demo(args: argparse.Namespace) -> None:
-    config = _load()
-    name = args.mode or config.mode
-    if not name:
-        raise CLIError("No mode is active. Run `cluster create <mode> --demo`.")
-    _demo(config, name)
+def cmd_mode_demo(args: argparse.Namespace) -> None:
+    config = load_cluster()
+    mode = get_mode(args.mode)
+    if config.mode != mode.name:
+        raise CLIError(f"'{mode.name}' isn't active. Run `cluster {mode.name} up --demo`.")
+    _demo(config, mode)
     print("\nDemo deployed. Create or delete a pod and watch the node LEDs.")
 
 
-def cmd_kubeconfig(args: argparse.Namespace) -> None:
-    config = _load()
-    cp = config.control_plane
-    assert cp is not None
-    result = remote.run(config, cp, "cat /etc/rancher/k3s/k3s.yaml")
-    if result.returncode != 0:
-        raise CLIError(f"Couldn't read the kubeconfig from {cp.name}. Is the kubernetes mode up?")
-    text = result.stdout.replace("https://127.0.0.1:6443", f"https://{cp.address}:6443")
-    out = Path(args.output).expanduser()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(text)
-    out.chmod(0o600)
-    print(f"Wrote {out}. Use it with:\n\n  export KUBECONFIG={out}\n  kubectl get nodes")
+def cmd_switch(args: argparse.Namespace) -> None:
+    config = load_cluster()
+    mode = get_mode(args.mode)
+    if config.mode == mode.name:
+        print(f"'{mode.name}' is already active.")
+        return
+    if config.mode:
+        _down(config, get_mode(config.mode))
+    _up(config, mode, args.demo)
 
 
 # --------------------------------------------------------------------------- #
-# services (cluster.toml)
+# workloads (cluster.toml)
 # --------------------------------------------------------------------------- #
 def _load_project(path: str | None) -> proj.Project:
     found = Path(path) if path else proj.find_project()
@@ -335,92 +301,136 @@ def _load_project(path: str | None) -> proj.Project:
     return proj.load_project(found)
 
 
+def _check_names(names: list[str]) -> None:
+    for n in names:
+        if n != "*" and not proj.SERVICE_NAME_RE.match(n):
+            raise CLIError(f"Invalid name '{n}'.")
+
+
 def cmd_deploy(args: argparse.Namespace) -> None:
-    config = _load()
+    config = load_cluster()
     project = _load_project(args.file)
-    services = project.select(args.services)
+    services, apps = project.select(args.names)
+    if apps:
+        kube.require_mode(config, kube.MODE)  # fail before building anything
 
     if project.build_command and not args.no_build:
         print(f"Building: {project.build_command}")
         result = subprocess.run(project.build_command, shell=True, cwd=project.root)
         if result.returncode != 0:
             raise CLIError(f"Build failed (exit code {result.returncode}).")
-    proj.check_artifacts(services)
 
     deployable = []
-    for svc in services:
-        nodes = proj.target_nodes(svc, config)
-        if not nodes:
-            print(f"Skipping '{svc.name}': no nodes match on = {svc.on!r}.")
-            continue
-        deployable.append(svc)
-        print(f"  {svc.name:<16} -> {', '.join(n.name for n in nodes)}")
-    if not deployable:
+    if services:
+        proj.check_artifacts(services)
+        for svc in services:
+            nodes = proj.target_nodes(svc, config)
+            if not nodes:
+                print(f"Skipping '{svc.name}': no nodes match on = {svc.on!r}.")
+                continue
+            deployable.append(svc)
+            print(f"  {svc.name:<16} -> {', '.join(n.name for n in nodes)}")
+    if not deployable and not apps:
         raise CLIError("Nothing to deploy.")
 
-    run_playbook("services/deploy.yml", extra_vars=proj.deployment_vars(deployable, config))
-    print("\nDeployed. `cluster ps` to check them, `cluster logs <service> -f` to follow output.")
+    if deployable:
+        run_playbook("services/deploy.yml", extra_vars=proj.deployment_vars(deployable, config))
+    if apps:
+        kube.deploy_apps(config, apps)
+    print("\nDeployed. `cluster ps` to check, `cluster logs <name> -f` to follow output.")
 
 
 def cmd_undeploy(args: argparse.Namespace) -> None:
-    _load()  # validates the config and refreshes the inventory
+    config = load_cluster()
     if args.all:
-        names = ["*"]
-    elif args.services:
-        names = args.services
+        services, apps = ["*"], ["*"]
+    elif args.names:
+        _check_names(args.names)
+        found = proj.find_project()
+        if found:  # we know which is which
+            project = proj.load_project(found)
+            services = [n for n in args.names if n not in project.apps]
+            apps = [n for n in args.names if n in project.apps]
+        else:  # no cluster.toml: remove whatever has that name
+            services, apps = list(args.names), list(args.names)
     else:
-        names = list(_load_project(args.file).services)
-    for n in names:
-        if n != "*" and not proj.SERVICE_NAME_RE.match(n):
-            raise CLIError(f"Invalid service name '{n}'.")
-    run_playbook("services/remove.yml", extra_vars={"service_names": names})
-    print("\nRemoved." if names != ["*"] else "\nAll pi-cluster services removed.")
+        project = _load_project(args.file)
+        services, apps = list(project.services), list(project.apps)
+
+    if services:
+        run_playbook("services/remove.yml", extra_vars={"service_names": services})
+    if apps:
+        kube.remove_apps(config, apps)
+    print("\nRemoved.")
 
 
-def cmd_ps(args: argparse.Namespace) -> None:
-    config = _load()
+def _service_rows(config: ClusterConfig) -> list[tuple[str, str, str, str]]:
     command = f"systemctl list-units --all --type=service --no-legend --plain '{proj.UNIT_PREFIX}*'"
     results = remote.parallel(config.nodes, lambda n: remote.run(config, n, command))
     rows = []
     for node in config.nodes:
         r = results[node.name]
         if r.returncode != 0:
-            rows.append((node.name, "-", "unreachable", ""))
+            rows.append(("-", node.name, "unreachable", ""))
             continue
         for line in r.stdout.splitlines():
             parts = line.split()
             if len(parts) >= 4 and parts[0].startswith(proj.UNIT_PREFIX):
                 name = parts[0][len(proj.UNIT_PREFIX) :].removesuffix(".service")
-                rows.append((node.name, name, parts[2], parts[3]))
-    if not any(r[1] != "-" for r in rows):
-        print("No pi-cluster services running. Deploy some with `cluster deploy`.")
-        for node, _, state, _ in rows:
-            print(f"  ({node}: {state})")
-        return
-    print(f"{'NODE':<16} {'SERVICE':<20} {'ACTIVE':<10} SUB")
-    for row in rows:
-        print(f"{row[0]:<16} {row[1]:<20} {row[2]:<10} {row[3]}")
+                rows.append((name, node.name, parts[2], parts[3]))
+    return rows
+
+
+def cmd_ps(args: argparse.Namespace) -> None:
+    config = load_cluster()
+    services = _service_rows(config)
+    apps = kube.app_rows(config) if config.mode == kube.MODE else []
+
+    real_services = [r for r in services if r[0] != "-"]
+    if real_services or not apps:
+        print("SERVICES (systemd)")
+        if real_services:
+            print(f"  {'NAME':<20} {'NODE':<16} {'ACTIVE':<10} SUB")
+            for name, node, active, sub in sorted(real_services):
+                print(f"  {name:<20} {node:<16} {active:<10} {sub}")
+        else:
+            print("  none")
+    for _, node, state, _ in services:
+        if state == "unreachable":
+            print(f"  ({node} is unreachable)")
+    if apps:
+        print("\nAPPS (k3s)")
+        print(f"  {'NAME':<20} {'READY':<7} {'URL':<28} NODES")
+        for name, ready, nodes, url in apps:
+            print(f"  {name:<20} {ready:<7} {url:<28} {nodes}")
+    if not real_services and not apps:
+        print("\nNothing deployed yet. Add a cluster.toml and run `cluster deploy`.")
 
 
 def cmd_logs(args: argparse.Namespace) -> None:
-    config = _load()
-    if not proj.SERVICE_NAME_RE.match(args.service):
-        raise CLIError(f"Invalid service name '{args.service}'.")
-    unit = f"{proj.UNIT_PREFIX}{args.service}.service"
+    config = load_cluster()
+    name = args.name
+    _check_names([name])
 
+    project = proj.load_project(found) if (found := proj.find_project()) else None
+    if project and name in project.apps:
+        kube.app_logs(config, name, args.lines, args.follow)
+        return
+
+    unit = f"{proj.UNIT_PREFIX}{name}.service"
     nodes: list[Node] = []
-    found = proj.find_project()
-    if found:
-        project = proj.load_project(found)
-        if args.service in project.services:
-            nodes = proj.target_nodes(project.services[args.service], config)
-    if not nodes:  # no cluster.toml for it: look for the unit on every node
+    if project and name in project.services:
+        nodes = proj.target_nodes(project.services[name], config)
+    if not nodes:  # not in cluster.toml: look for it on the cluster
+        if name in kube.app_names_on_cluster(config):
+            kube.app_logs(config, name, args.lines, args.follow)
+            return
         checks = remote.parallel(
             config.nodes, lambda n: remote.run(config, n, f"systemctl cat {unit} >/dev/null 2>&1")
         )
         nodes = [n for n in config.nodes if checks[n.name].returncode == 0]
     if not nodes:
-        raise CLIError(f"'{args.service}' isn't deployed on any node.")
+        raise CLIError(f"Nothing called '{name}' is deployed.")
 
     command = f"sudo -n journalctl -u {unit} -n {args.lines} --no-pager -o short-iso"
     if args.follow:
@@ -432,13 +442,13 @@ def cmd_logs(args: argparse.Namespace) -> None:
 # lights
 # --------------------------------------------------------------------------- #
 def cmd_lights_install(args: argparse.Namespace) -> None:
-    _load()
+    load_cluster()
     run_playbook("lights/install.yml")
     print("\n`cluster-led` is installed on every node. Try `cluster lights flash`.")
 
 
 def cmd_lights_flash(args: argparse.Namespace) -> None:
-    config = _load()
+    config = load_cluster()
     nodes = [config.find_node(r) for r in args.nodes] if args.nodes else config.nodes
     command = f"cluster-led {args.color} && sleep {args.seconds} && cluster-led off"
     results = remote.parallel(nodes, lambda n: remote.run(config, n, command))
@@ -465,6 +475,27 @@ def cmd_lights_firmware(args: argparse.Namespace) -> None:
 # --------------------------------------------------------------------------- #
 # parser
 # --------------------------------------------------------------------------- #
+def _add_mode_group(sub: argparse._SubParsersAction, mode: Mode) -> None:
+    """`cluster <mode> up | down | demo`, plus the mode's own commands."""
+    group = sub.add_parser(
+        mode.name, aliases=list(mode.aliases), help=mode.summary, description=mode.summary
+    )
+    group.set_defaults(mode=mode.name)
+    actions = group.add_subparsers(
+        title="commands", dest="action", required=True, metavar="<command>"
+    )
+    p = actions.add_parser("up", help=f"set up {mode.name} on the nodes")
+    p.add_argument("--demo", action="store_true", help="also deploy the demo")
+    p.set_defaults(func=cmd_mode_up)
+    p = actions.add_parser("down", help=f"remove {mode.name}, leaving the nodes bare")
+    p.set_defaults(func=cmd_mode_down)
+    if mode.demo_playbooks:
+        p = actions.add_parser("demo", help="deploy the demo apps")
+        p.set_defaults(func=cmd_mode_demo)
+    if mode.commands:
+        importlib.import_module(mode.commands).register(actions)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cluster",
@@ -483,8 +514,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     def add_yes(p: argparse.ArgumentParser) -> None:
         p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
-
-    mode_names = sorted(MODES)
 
     # setup
     p = add("init", cmd_init, "create the SSH key, discover the Pis, write the config")
@@ -528,48 +557,28 @@ def build_parser() -> argparse.ArgumentParser:
     add_yes(p)
 
     # modes
-    add("modes", cmd_modes, "list modes (* = active)")
-    p = add("create", cmd_create, "set up a mode on bare nodes")
-    p.add_argument("mode", choices=mode_names)
-    p.add_argument("--demo", action="store_true", help="also deploy the mode's demo apps")
-    p = add("switch", cmd_switch, "destroy the active mode and create another")
-    p.add_argument("mode", choices=mode_names)
-    p.add_argument("--demo", action="store_true", help="also deploy the mode's demo apps")
-    p = add("destroy", cmd_destroy, "remove the active mode, leaving the nodes bare")
-    p.add_argument("mode", nargs="?", choices=mode_names, help="defaults to the active mode")
-    p = add(
-        "demo", cmd_demo, "deploy the active mode's demo apps (kubernetes: LED operator + Flask)"
-    )
-    p.add_argument("mode", nargs="?", choices=mode_names, help="defaults to the active mode")
-    p = add("kubeconfig", cmd_kubeconfig, "fetch the k3s kubeconfig so kubectl works from here")
-    p.add_argument(
-        "-o",
-        "--output",
-        default=KUBECONFIG_DEFAULT,
-        help="where to write it (default: %(default)s)",
-    )
+    add("modes", cmd_modes, "list the modes and which one is active")
+    p = add("switch", cmd_switch, "take the active mode down and bring another up")
+    p.add_argument("mode", help=f"one of: {', '.join(sorted(MODES))}")
+    p.add_argument("--demo", action="store_true", help="also deploy the new mode's demo")
+    for mode in MODES.values():
+        _add_mode_group(sub, mode)
 
-    # services
-    p = add("deploy", cmd_deploy, "build and deploy the services in cluster.toml")
-    p.add_argument("services", nargs="*", help="only these services (default: all)")
+    # workloads
+    p = add("deploy", cmd_deploy, "build and deploy the services and apps in cluster.toml")
+    p.add_argument("names", nargs="*", help="only these (default: everything)")
     p.add_argument("-f", "--file", help="path to cluster.toml (default: search upwards)")
     p.add_argument("--no-build", action="store_true", help="skip the [build] command")
-    p = add("undeploy", cmd_undeploy, "stop and remove deployed services")
-    p.add_argument("services", nargs="*", help="services to remove (default: all in cluster.toml)")
+    p = add("undeploy", cmd_undeploy, "stop and remove deployed services and apps")
+    p.add_argument("names", nargs="*", help="what to remove (default: everything in cluster.toml)")
     p.add_argument("-f", "--file", help="path to cluster.toml (default: search upwards)")
-    p.add_argument(
-        "--all", action="store_true", help="remove every pi-cluster service on every node"
-    )
-    add("ps", cmd_ps, "list deployed services on every node")
-    p = add("logs", cmd_logs, "show a service's logs from every node it runs on")
-    p.add_argument("service")
+    p.add_argument("--all", action="store_true", help="remove everything pi-cluster deployed")
+    add("ps", cmd_ps, "list deployed services and apps")
+    p = add("logs", cmd_logs, "show logs from every node or pod running a service or app")
+    p.add_argument("name")
     p.add_argument("-f", "--follow", action="store_true", help="keep streaming new lines")
     p.add_argument(
-        "-n",
-        "--lines",
-        type=int,
-        default=50,
-        help="lines of history per node (default: %(default)s)",
+        "-n", "--lines", type=int, default=50, help="lines of history (default: %(default)s)"
     )
 
     # lights

@@ -24,6 +24,8 @@
         - /var/lib/pi-cluster/manifests
         - /var/lib/pi-cluster/containers
         - /var/lib/pi-cluster/operator-key
+        - /var/lib/pi-cluster/apps
+        - /var/lib/pi-cluster/build
 
 - name: Unexport and unmount the SSD (its data is kept)
   hosts: storage

@@ -7,9 +7,10 @@ and keeps them in a known **bare** state. On top of that you can:
 
 - **switch modes** — whole environments such as a [k3s](https://k3s.io/)
   Kubernetes cluster, which you can tear down again cleanly;
-- **deploy your own binaries** — describe services in a `cluster.toml` (a Rust
-  controller on one node and an agent on the rest, say) and `cluster deploy`
-  builds them, copies them over, and runs them under systemd;
+- **run your own things** — describe them in a `cluster.toml` (a Rust
+  controller on one node and agents on the rest, or containers on k3s) and
+  `cluster deploy` builds, ships and runs them. Or drive k3s with kubectl
+  yourself, for learning;
 - **flash LEDs** — an optional [Neo Trinkey](https://www.adafruit.com/product/4870)
   per node, so you can *see* where work lands.
 
@@ -55,19 +56,21 @@ storage node), so `cluster` works from any folder.
 
 ## Modes
 
-A mode is a whole environment. Only one is active at a time.
+A mode is a whole environment layered on bare nodes. Only one is active at a
+time, and each has its own command group named after it:
 
 ```bash
-cluster modes                     # list them (* = active)
-cluster create kubernetes         # k3s + private registry + nginx example
-cluster kubeconfig                # writes ~/.kube/pi-cluster.yaml for kubectl
-cluster switch <other-mode>       # destroy the current mode, create another
-cluster destroy                   # back to bare
+cluster modes                     # list them, and which is active
+cluster kubernetes up             # bring one up (aliases: kube, k3s)
+cluster kubernetes down           # back to bare
+cluster switch <mode>             # take the active mode down, bring another up
 ```
+
+Every mode has `up`, `down` and (if it has one) `demo`, plus its own extras.
 
 ### kubernetes
 
-`cluster create kubernetes`:
+`cluster kube up`:
 
 1. installs the k3s server on the control-plane and joins the workers;
 2. mounts the SSD on the storage node and exports it over NFS (skipped if you
@@ -75,7 +78,16 @@ cluster destroy                   # back to bare
 3. deploys a private registry at `localhost:30007` on every node, plus an nginx
    example at `http://<any-node>:30080`.
 
-Add `--demo` (or run `cluster demo` later) to also build and roll out:
+Its own commands:
+
+```bash
+cluster kube config               # write ~/.kube/pi-cluster.yaml so kubectl works from here
+cluster kube build ./web -t web   # build a Dockerfile folder on the cluster, push it to the registry
+cluster kube registry             # registry address and the images in it
+cluster kube demo                 # the LED pod-operator and a Flask example
+```
+
+The demo (also `cluster kube up --demo`) rolls out:
 
 - the **LED pod-operator**, a [kopf](https://kopf.readthedocs.io/) operator
   that flashes a node's LEDs green when a pod lands on it and red when one
@@ -83,12 +95,25 @@ Add `--demo` (or run `cluster demo` later) to also build and roll out:
 - a **Flask example** at `http://<any-node>:30005` that reports which node
   served you.
 
-The images are built on the control-plane (so they're ARM) with buildah and
-pushed to the in-cluster registry.
+Images are always built on the control-plane (so they're ARM, and you don't
+need Docker here) with buildah, and tagged by a hash of their contents.
 
-## Deploying your own binaries
+There are two ways to run your own things on k3s:
 
-Put a `cluster.toml` in your project:
+- **By hand with kubectl** — the way to learn Kubernetes. Write your own YAML,
+  use `cluster kube build` to get images into the registry, and `kubectl apply`.
+  [docs/registry.md](docs/registry.md) covers pushing from your own machine too.
+- **With `cluster.toml`** — when you just want something running, without
+  kubectl. See below.
+
+## Running your own things: `cluster.toml`
+
+Put a `cluster.toml` in your project. It can hold two kinds of workload:
+
+- **`[services]`** — binaries run under systemd on the nodes, with or without a
+  mode (great for your own Rust distributed systems);
+- **`[apps]`** — containers on k3s (kubernetes mode). pi-cluster builds the
+  image and writes the Deployment and Service for you.
 
 ```toml
 [build]
@@ -104,24 +129,27 @@ binary = "target/aarch64-unknown-linux-musl/release/agent"
 on = "workers"
 args = ["--controller", "{{ control_plane }}:8080"]
 env = { NODE_NAME = "{{ node_name }}" }
+
+[apps.web]
+build = "./web"          # a folder with a Dockerfile (or: image = "nginx:stable-alpine")
+replicas = 3
+port = 8080
 ```
 
-Then, from that folder:
+Then, from that folder, the same commands cover both:
 
 ```bash
-cluster deploy              # build, copy to the right nodes, (re)start
-cluster ps                  # what's running where
-cluster logs agent -f       # follow the agent's output from every worker
-cluster undeploy            # stop and remove them
+cluster deploy              # build, ship, (re)start — only what changed
+cluster ps                  # what's running where (services and apps)
+cluster logs agent -f       # follow output from every node or pod running it
+cluster undeploy            # stop and remove everything in cluster.toml
 ```
 
-Each service runs as `pi-cluster-<name>.service` from `/opt/pi-cluster/<name>/`.
+Services run as `pi-cluster-<name>.service` from `/opt/pi-cluster/<name>/`;
 `cluster deploy` refuses x86 binaries, which catches the most common mistake.
 See [docs/cluster-toml.md](docs/cluster-toml.md) for every option, and
 [examples/hello-agent](examples/hello-agent) for a working Rust controller and
 agent to start from.
-
-Services work with or without a mode active.
 
 ## LEDs
 
@@ -153,6 +181,8 @@ reflash.
 
 ## All commands
 
+**The nodes**
+
 | Command | What it does |
 | --- | --- |
 | `cluster init` | Create the SSH key, discover the Pis, write the config. |
@@ -162,17 +192,36 @@ reflash.
 | `cluster ssh <node> [cmd]` | Shell on a node (`cluster ssh 2` works). |
 | `cluster shutdown` | Power off every node (workers first). |
 | `cluster reset` | Remove everything pi-cluster installed; reboot. |
-| `cluster modes` | List modes. |
-| `cluster create <mode> [--demo]` | Set up a mode. |
+
+**Modes**
+
+| Command | What it does |
+| --- | --- |
+| `cluster modes` | List modes and which is active. |
 | `cluster switch <mode> [--demo]` | Replace the active mode. |
-| `cluster destroy` | Remove the active mode. |
-| `cluster demo` | Deploy the active mode's demo apps. |
-| `cluster kubeconfig` | Fetch the k3s kubeconfig. |
-| `cluster deploy [svc…]` | Build and deploy services from `cluster.toml`. |
-| `cluster undeploy [svc…] [--all]` | Stop and remove services. |
-| `cluster ps` | Services on every node. |
-| `cluster logs <svc> [-f]` | A service's logs from every node it runs on. |
-| `cluster lights install\|flash\|firmware` | LED helpers. |
+| `cluster <mode> up [--demo]` | Bring a mode up. |
+| `cluster <mode> down` | Take it down, leaving the nodes bare. |
+| `cluster <mode> demo` | Deploy the mode's demo. |
+| `cluster kube config` | Fetch the kubeconfig for kubectl. |
+| `cluster kube build <dir> [-t name]` | Build an image on the cluster and push it to the registry. |
+| `cluster kube registry` | Registry address and images. |
+
+**Workloads (`cluster.toml`)**
+
+| Command | What it does |
+| --- | --- |
+| `cluster deploy [name…]` | Build and deploy services and apps. |
+| `cluster undeploy [name…] [--all]` | Stop and remove them. |
+| `cluster ps` | What's running where. |
+| `cluster logs <name> [-f]` | Logs from every node or pod running it. |
+
+**LEDs**
+
+| Command | What it does |
+| --- | --- |
+| `cluster lights install` | Install `cluster-led` on every node. |
+| `cluster lights flash [node…]` | Flash LEDs to check they work. |
+| `cluster lights firmware` | Save the Trinkey firmware locally. |
 
 ## Troubleshooting
 

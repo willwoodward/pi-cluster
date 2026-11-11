@@ -1,4 +1,4 @@
-# Install apt packages and record the ones pi-cluster added, so `cluster destroy`
+# Install apt packages and record the ones pi-cluster added, so `cluster <mode> down`
 # and `cluster reset` remove exactly those (and nothing you installed yourself).
 # Vars: packages (list), component (name of the mode / feature installing them).
 - name: Check which of {{ packages | join(', ') }} are already installed
