@@ -1,69 +1,63 @@
-# Flashing your Raspberry Pi SD cards / SSDs
+# Flashing your Raspberry Pis
 
-`pi-cluster` discovers your Pis automatically, but only if each one is flashed
-with a consistent hostname, a known username, and the SSH public key that
-`cluster init` generates for you. This guide walks through that with
+`pi-cluster` finds your Pis automatically, as long as each one is flashed with
+a consistent hostname, a known username, and the SSH public key that `cluster`
+generates for you. This guide does that with
 [Raspberry Pi Imager](https://www.raspberrypi.com/software/).
 
-Do this once per Pi (and once for the SSD, if you boot from it).
-
-## 1. Generate the SSH key first
-
-Run this before flashing so you have a public key to paste into Imager:
+## 1. Get the public key
 
 ```bash
 cluster init
 ```
 
-It creates `~/.ssh/pi-cluster` / `~/.ssh/pi-cluster.pub` and prints the public
-key. Copy that public key — you'll paste it into Imager in step 3.
-
-If you only want the key and the settings (no discovery yet), you can stop after
-this and come back to `cluster init` once the Pis are flashed and booted.
+On the first run this creates `~/.ssh/pi-cluster` (a key used only for the
+cluster), prints the settings to flash with, and then looks for Pis — it won't
+find any yet, which is fine. `cluster pubkey` prints the key again at any time.
 
 ## 2. Choose the OS
 
 In Raspberry Pi Imager:
 
 - **Device:** your Pi model.
-- **Operating System:** Raspberry Pi OS Lite (64-bit) is plenty — no desktop needed.
-- **Storage:** the SD card or SSD for this node.
+- **Operating system:** Raspberry Pi OS Lite (64-bit). No desktop needed.
+- **Storage:** the SD card (or SSD, if this Pi boots from one).
 
-## 3. Apply the custom settings (the important part)
+## 3. Apply the custom settings
 
-Click the gear / **Edit Settings** before writing. For **each** node, set:
+Open **Edit settings** before writing. For **each** Pi:
 
 | Setting | Value |
 | --- | --- |
-| Hostname | `pi-node-01` on the first Pi, `pi-node-02` on the second, and so on (zero-padded, incrementing) |
+| Hostname | `pi-node-01` on the first Pi, `pi-node-02` on the second, … (two digits) |
 | Username | `pi` (or whatever you pass to `cluster init --username`) |
-| Enable SSH | **Allow public-key authentication only**, and paste the public key from step 1 |
-| Wireless LAN | optional — only if a node uses Wi-Fi instead of the PoE switch |
+| SSH | **Allow public-key authentication only**, and paste the key from step 1 |
+| Wireless LAN | Only if this Pi uses Wi-Fi instead of the switch |
 
-Notes:
+- The hostname prefix and username must match `cluster init` (defaults:
+  `pi-node` and `pi`).
+- `pi-node-01` becomes the **control-plane**; the rest become workers.
+- If you have a data SSD, attach it to `pi-node-01` — that's the default
+  storage node. It needs an ext4 partition at `/dev/sda1` (change either with
+  `--storage-device` or in the config). No SSD? Use `cluster init --no-storage`.
+- If a Pi **boots** from its SSD, `/dev/sda1` is its boot partition: point
+  `storage.device` at a separate data partition, or use `--no-storage`.
 
-- The hostname prefix (`pi-node`) and username must match what you give
-  `cluster init`. The defaults are `pi-node` and `pi`.
-- Number the Pis in the order you want them. `pi-node-01` becomes the
-  **control-plane** node; the rest become workers.
-- Attach the **1 TB SSD to `pi-node-01`** (the control-plane), which is the
-  default storage node exported over NFS for the registry. To use a different
-  node, edit `cluster-config.json` after `init`.
+## 4. Boot
 
-## 4. Write, boot, and wire up
-
-1. Write each card/SSD and insert it into the matching Pi.
-2. Connect every Pi to the PoE switch and power the switch on.
-3. Give them a minute to boot and appear on the network.
+1. Write each card and put it in the matching Pi.
+2. Connect every Pi to the switch and power up.
+3. Give them a minute or two.
 
 ## 5. Discover
 
-Back on your machine:
-
 ```bash
-cluster init      # discovers the Pis, writes cluster-config.json + inventory.ini
-cluster apply     # verifies SSH into every node and runs base setup
+cluster init            # again: finds the Pis and writes ~/.config/pi-cluster/config.json
+cluster apply           # checks SSH to every node and runs base setup
 ```
 
-If discovery finds nothing, see the troubleshooting notes in the main
-[README](../README.md#troubleshooting).
+Base setup enables memory cgroups, which needs one reboot — `cluster apply`
+waits for the nodes to come back.
+
+If discovery finds nothing, see
+[Troubleshooting](../README.md#troubleshooting).

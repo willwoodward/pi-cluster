@@ -1,0 +1,19 @@
+# Remove the packages recorded by apt-install.yml.
+# Vars: component (a component name, or "*" for every component).
+- name: Read the packages pi-cluster installed ({{ component }})
+  ansible.builtin.shell: cat /var/lib/pi-cluster/packages/{{ component }} 2>/dev/null || true
+  register: pi_cluster_tracked
+  changed_when: false
+
+- name: Remove them
+  ansible.builtin.apt:
+    name: "{{ pi_cluster_tracked.stdout.split() | unique }}"
+    state: absent
+    purge: true
+    autoremove: true
+  when: pi_cluster_tracked.stdout | trim | length > 0
+
+- name: Forget them
+  ansible.builtin.shell: rm -fv /var/lib/pi-cluster/packages/{{ component }}
+  register: pi_cluster_forgot
+  changed_when: pi_cluster_forgot.stdout | length > 0

@@ -1,0 +1,43 @@
+# Deploy the in-cluster registry (NFS-backed if there's an SSD, local storage
+# otherwise) and the nginx example.
+- name: Gather the storage node's address
+  hosts: storage
+  gather_facts: true
+  tasks: []
+
+- name: Deploy the registry and the nginx example
+  hosts: control_plane
+  become: true
+  gather_facts: false
+  vars:
+    manifest_dir: /var/lib/pi-cluster/manifests
+    use_nfs: "{{ groups['storage'] | length > 0 }}"
+  tasks:
+    - name: Copy the manifests to the control-plane
+      ansible.builtin.copy:
+        src: "{{ pi_cluster_data }}/modes/kubernetes/manifests/"
+        dest: "{{ manifest_dir }}/"
+        mode: preserve
+
+    - name: Render the registry's storage
+      ansible.builtin.template:
+        src: "{{ pi_cluster_data }}/modes/kubernetes/manifests/registry/storage.yml.j2"
+        dest: "{{ manifest_dir }}/registry/storage.yml"
+        mode: "0644"
+      vars:
+        nfs_server: "{{ hostvars[groups['storage'][0]].ansible_default_ipv4.address if use_nfs else '' }}"
+        nfs_path: "{{ storage_mount }}/registry"
+
+    - name: Apply the registry
+      ansible.builtin.command: k3s kubectl apply -f {{ manifest_dir }}/registry/
+      register: applied
+      changed_when: "' created' in applied.stdout or ' configured' in applied.stdout"
+
+    - name: Wait for the registry to be ready
+      ansible.builtin.command: k3s kubectl rollout status deployment/registry --timeout=300s
+      changed_when: false
+
+    - name: Apply the nginx example
+      ansible.builtin.command: k3s kubectl apply -f {{ manifest_dir }}/example-nginx/
+      register: applied
+      changed_when: "' created' in applied.stdout or ' configured' in applied.stdout"

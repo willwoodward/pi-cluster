@@ -1,0 +1,14 @@
+# Deploy services described in cluster.toml. The CLI renders everything per
+# node (unit file, env file) and passes it in as the `services` variable.
+- name: Deploy pi-cluster services
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Deploy each service that targets this node
+      ansible.builtin.include_tasks: "{{ pi_cluster_data }}/services/deploy-one.yml"
+      loop: "{{ services }}"
+      loop_control:
+        loop_var: svc
+        label: "{{ svc.name }}"
+      when: inventory_hostname in svc.hosts

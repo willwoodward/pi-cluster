@@ -1,0 +1,77 @@
+# Install one service on this node. `svc` comes from the CLI (see project.py).
+- name: "{{ svc.name }}: check the user '{{ svc.user }}' exists"
+  ansible.builtin.command: getent passwd {{ svc.user }}
+  check_mode: false
+  changed_when: false
+  register: pi_cluster_user
+  failed_when: false
+
+- name: "{{ svc.name }}: fail if the user is missing"
+  ansible.builtin.fail:
+    msg: "User '{{ svc.user }}' doesn't exist on {{ inventory_hostname }}. Create it, or change `user` in cluster.toml."
+  when: pi_cluster_user.rc != 0
+
+- name: "{{ svc.name }}: check its groups exist"
+  ansible.builtin.command: getent group {{ item }}
+  loop: "{{ svc.groups }}"
+  check_mode: false
+  changed_when: false
+
+- name: "{{ svc.name }}: create {{ svc.directory }}"
+  ansible.builtin.file:
+    path: "{{ svc.directory }}"
+    state: directory
+    owner: "{{ svc.user }}"
+    mode: "0755"
+
+- name: "{{ svc.name }}: copy the binary"
+  ansible.builtin.copy:
+    src: "{{ svc.binary }}"
+    dest: "{{ svc.directory }}/{{ svc.binary_name }}"
+    owner: root
+    group: root
+    mode: "0755"
+  register: pi_cluster_bin
+
+- name: "{{ svc.name }}: copy extra files"
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ svc.directory }}/{{ item | basename }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ svc.files }}"
+  register: pi_cluster_files
+
+- name: "{{ svc.name }}: write the environment file"
+  ansible.builtin.copy:
+    content: "{{ svc.hosts[inventory_hostname].env }}"
+    dest: "{{ svc.directory }}/env"
+    owner: root
+    group: "{{ svc.user }}"
+    mode: "0640"
+  register: pi_cluster_env
+
+- name: "{{ svc.name }}: write the systemd unit"
+  ansible.builtin.copy:
+    content: "{{ svc.hosts[inventory_hostname].unit }}"
+    dest: "/etc/systemd/system/{{ svc.unit_name }}"
+    mode: "0644"
+  register: pi_cluster_unit
+
+- name: "{{ svc.name }}: start (or restart) it"
+  ansible.builtin.systemd:
+    name: "{{ svc.unit_name }}"
+    daemon_reload: true
+    enabled: true
+    state: "{{ 'restarted' if (pi_cluster_bin is changed or pi_cluster_files is changed or pi_cluster_env is changed or pi_cluster_unit is changed) else 'started' }}"
+
+- name: "{{ svc.name }}: make sure it stays up"
+  ansible.builtin.shell: |
+    sleep 2
+    if ! systemctl is-active --quiet {{ svc.unit_name }}; then
+      echo "{{ svc.name }} isn't running. Last log lines:"
+      journalctl -u {{ svc.unit_name }} -n 20 --no-pager
+      exit 1
+    fi
+  changed_when: false

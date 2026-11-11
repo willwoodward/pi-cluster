@@ -1,15 +1,22 @@
-# Generated per-cluster (contain your node hostnames / paths)
+# Old per-folder cluster files (the config now lives in ~/.config/pi-cluster)
 inventory.ini
 cluster-config.json
 
-# SSH keys and kubeconfig — never commit these
-config
+# SSH keys and kubeconfigs — never commit these
 id_rsa*
+id_ed25519*
 pi-cluster
 pi-cluster.pub
+*.kubeconfig
 
 # Python
 __pycache__/
+*.py[cod]
 *.egg-info/
 build/
 dist/
+.venv/
+.pytest_cache/
+
+# Rust example
+examples/*/target/

@@ -1,0 +1,21 @@
+# Workers first, then the control-plane. The shutdown runs detached (async, no
+# polling) so Ansible doesn't report the dropped SSH connection as a failure.
+- name: Power off the workers
+  hosts: workers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Power off
+      ansible.builtin.shell: sleep 2 && /sbin/shutdown -h now
+      async: 60
+      poll: 0
+
+- name: Power off the control-plane
+  hosts: control_plane
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Power off
+      ansible.builtin.shell: sleep 2 && /sbin/shutdown -h now
+      async: 60
+      poll: 0

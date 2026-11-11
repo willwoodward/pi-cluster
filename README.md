@@ -2,144 +2,223 @@
 
 Turn a stack of Raspberry Pis into a hands-on distributed-systems lab.
 
-`pi-cluster` gives you a `cluster` command-line tool that discovers the Pis on
-your network, generates an Ansible inventory, and applies a **mode** — a
-self-contained distributed-systems environment. The first mode is a
-[k3s](https://k3s.io/) Kubernetes cluster with a private registry, example
-apps, and an optional **LED pod-visualiser** that flashes a light on the
-physical node where a pod lands.
+`pi-cluster` installs a `cluster` command that finds the Pis on your network
+and keeps them in a known **bare** state. On top of that you can:
 
-The mode system is designed to grow: future modes (a Raft demo, MPI, a gossip
-protocol) can reuse the same discovery, inventory, and LED machinery.
+- **switch modes** — whole environments such as a [k3s](https://k3s.io/)
+  Kubernetes cluster, which you can tear down again cleanly;
+- **deploy your own binaries** — describe services in a `cluster.toml` (a Rust
+  controller on one node and an agent on the rest, say) and `cluster deploy`
+  builds them, copies them over, and runs them under systemd;
+- **flash LEDs** — an optional [Neo Trinkey](https://www.adafruit.com/product/4870)
+  per node, so you can *see* where work lands.
 
-## Hardware
+`cluster reset` takes every node back to bare whenever you want a clean slate
+to experiment with cgroups, namespaces, KVM or anything else by hand.
 
-- 2 or more Raspberry Pis (any mix; the tool adapts to however many it finds).
-- A network switch — PoE keeps the wiring tidy.
-- Optional: an SSD on one Pi, exported over NFS to back the registry.
-- Optional: an [Adafruit Neo Trinkey](https://www.adafruit.com/product/4870)
-  per node for the LED visualiser.
+## What you need
+
+- 2 or more Raspberry Pis running 64-bit Raspberry Pi OS (Lite is plenty).
+- A network switch (PoE keeps the wiring tidy).
+- Optional: an SSD on one Pi, exported over NFS to back the k3s registry.
+- Optional: a Neo Trinkey per node.
+- On your machine: Python 3.10+ and OpenSSH. Linux, macOS and WSL2 all work.
 
 ## Install
 
 ```bash
-pip install pi-cluster        # or: pipx install pi-cluster
+pipx install pi-cluster      # or: pip install pi-cluster
 ```
 
-This installs the `cluster` command and `ansible-core`.
+This installs the `cluster` command (also available as `pi-cluster`) along with
+Ansible, which it uses under the hood.
 
-## Getting started
-
-### 1. Flash the SD cards / SSDs
-
-Follow [docs/flashing-guide.md](docs/flashing-guide.md). In short: flash each Pi
-with Raspberry Pi Imager, giving it the hostname `pi-node-01`, `pi-node-02`, …,
-a shared username, and the SSH public key that `cluster init` generates.
-
-### 2. Discover and connect
+## Quick start
 
 ```bash
-cluster init      # generate SSH key, discover the Pis, write config + inventory
-cluster apply     # verify SSH into every node and run base setup
+cluster init       # creates an SSH key and prints the settings to flash with
 ```
 
-`cluster init` writes two files in the current directory:
-
-- `cluster-config.json` — the editable source of truth (nodes, roles, storage).
-- `inventory.ini` — the Ansible inventory, regenerated from the config on every
-  command.
-
-The lowest-numbered node becomes the control-plane; the rest become workers.
-
-### 3. Bring up a mode
+Flash each Pi with Raspberry Pi Imager as `pi-node-01`, `pi-node-02`, … using
+that key; [docs/flashing-guide.md](docs/flashing-guide.md) walks through it.
+Boot them, then:
 
 ```bash
-cluster modes                 # list available modes
-cluster create kubernetes     # install k3s + registry + example apps
+cluster init           # run again now they're up, to discover them
+cluster apply          # check SSH to every node and run base setup
+cluster status         # who's up, and what mode is active
 ```
 
-You now have a working k3s cluster. Fetch the kubeconfig from the control-plane
-node (`/etc/rancher/k3s/k3s.yaml`) to drive it with `kubectl`.
+`pi-node-01` becomes the control-plane; the rest are workers. Everything is
+recorded in `~/.config/pi-cluster/config.json` (edit it to change roles or the
+storage node), so `cluster` works from any folder.
 
-### 4. Deploy the apps (optional)
+## Modes
+
+A mode is a whole environment. Only one is active at a time.
 
 ```bash
-cluster deploy kubernetes     # build + push images, roll out the LED operator + Flask app
+cluster modes                     # list them (* = active)
+cluster create kubernetes         # k3s + private registry + nginx example
+cluster kubeconfig                # writes ~/.kube/pi-cluster.yaml for kubectl
+cluster switch <other-mode>       # destroy the current mode, create another
+cluster destroy                   # back to bare
 ```
 
-Then create or delete a pod and watch the LED flash on the node it lands on
-(green = created, red = deleted). See [the LED visualiser](#led-pod-visualiser).
+### kubernetes
 
-## Commands
+`cluster create kubernetes`:
+
+1. installs the k3s server on the control-plane and joins the workers;
+2. mounts the SSD on the storage node and exports it over NFS (skipped if you
+   have no SSD — the registry then uses local storage);
+3. deploys a private registry at `localhost:30007` on every node, plus an nginx
+   example at `http://<any-node>:30080`.
+
+Add `--demo` (or run `cluster demo` later) to also build and roll out:
+
+- the **LED pod-operator**, a [kopf](https://kopf.readthedocs.io/) operator
+  that flashes a node's LEDs green when a pod lands on it and red when one
+  leaves;
+- a **Flask example** at `http://<any-node>:30005` that reports which node
+  served you.
+
+The images are built on the control-plane (so they're ARM) with buildah and
+pushed to the in-cluster registry.
+
+## Deploying your own binaries
+
+Put a `cluster.toml` in your project:
+
+```toml
+[build]
+command = "cargo zigbuild --release --target aarch64-unknown-linux-musl"
+
+[services.controller]
+binary = "target/aarch64-unknown-linux-musl/release/controller"
+on = "control-plane"
+args = ["--listen", "0.0.0.0:8080"]
+
+[services.agent]
+binary = "target/aarch64-unknown-linux-musl/release/agent"
+on = "workers"
+args = ["--controller", "{{ control_plane }}:8080"]
+env = { NODE_NAME = "{{ node_name }}" }
+```
+
+Then, from that folder:
+
+```bash
+cluster deploy              # build, copy to the right nodes, (re)start
+cluster ps                  # what's running where
+cluster logs agent -f       # follow the agent's output from every worker
+cluster undeploy            # stop and remove them
+```
+
+Each service runs as `pi-cluster-<name>.service` from `/opt/pi-cluster/<name>/`.
+`cluster deploy` refuses x86 binaries, which catches the most common mistake.
+See [docs/cluster-toml.md](docs/cluster-toml.md) for every option, and
+[examples/hello-agent](examples/hello-agent) for a working Rust controller and
+agent to start from.
+
+Services work with or without a mode active.
+
+## LEDs
+
+Each Neo Trinkey needs firmware once:
+
+```bash
+cluster lights firmware     # saves code.py — copy it onto the Trinkey's CIRCUITPY drive
+cluster lights install      # installs the `cluster-led` tool on every node
+cluster lights flash        # flash every node white to check they're working
+cluster lights flash 2 --color green
+```
+
+Your own services can call `cluster-led <colour>` on the node too (they need
+`groups = ["dialout"]` in `cluster.toml` if they don't run as the SSH user).
+
+## Back to bare
+
+```bash
+cluster reset
+```
+
+Uninstalls k3s, removes deployed services, the LED tool, and every apt package
+pi-cluster installed (it keeps a record per node, so packages you installed
+yourself are left alone), then reboots to clear leftover kernel state such as
+iptables rules. Base setup — hostname and memory cgroups — is kept.
+
+It only removes what pi-cluster added. To undo changes you made by hand,
+reflash.
+
+## All commands
 
 | Command | What it does |
 | --- | --- |
-| `cluster init` | Generate the SSH key, discover the Pis, write config + inventory. |
-| `cluster apply` | Verify SSH to every node and run base setup. |
-| `cluster create <mode>` | Apply a mode (e.g. `kubernetes`). |
-| `cluster deploy <mode>` | Build + deploy the mode's apps (e.g. the LED operator). |
-| `cluster destroy <mode>` | Tear a mode back down. |
-| `cluster status` | Check which nodes are reachable. |
-| `cluster shutdown` | Power off every node. |
-| `cluster modes` | List available modes. |
-
-## The kubernetes mode
-
-`cluster create kubernetes` runs, in order:
-
-1. **install** — install the k3s server on the control-plane and join the workers.
-2. **setup-nfs** — export the SSD over NFS from the storage node.
-3. **configure-registry** — point k3s at the in-cluster registry mirror.
-4. **deploy** — apply the private registry and the nginx example.
-
-### LED pod-visualiser
-
-`cluster deploy kubernetes` builds the images **on the control-plane node**
-(so they're the right architecture), pushes them to the in-cluster registry, and
-rolls out:
-
-- the **`pod-operator`** — a [kopf](https://kopf.readthedocs.io/) operator that
-  watches pod create/delete events and SSHes into the affected node to flash its
-  Neo Trinkey LED (green on create, red on delete). Its SSH key comes from a
-  mounted Kubernetes Secret, never baked into the image;
-- the **Flask example** app.
-
-**Hardware:** flash each Neo Trinkey with the CircuitPython firmware at
-`cluster/data/modes/kubernetes/lights/code.py` (copy it onto the Trinkey as
-`code.py`). `cluster deploy` installs the matching host script on every node.
-Test one node directly with:
-
-```bash
-python cluster/data/modes/kubernetes/lights/light-flash.py <node-ip>
-```
-
-## Layout
-
-```
-cluster/
-  cli.py            # the `cluster` command
-  config.py         # cluster-config.json model
-  discovery.py      # mDNS + subnet discovery
-  inventory.py      # config -> inventory.ini
-  ansible_runner.py # runs bundled playbooks
-  modes.py          # registry of modes
-  data/
-    playbooks/      # base playbooks (setup, status, shutdown)
-    modes/
-      kubernetes/   # install/deploy playbooks, manifests, LED scripts
-docs/
-  flashing-guide.md
-```
+| `cluster init` | Create the SSH key, discover the Pis, write the config. |
+| `cluster pubkey` | Print the public key for Raspberry Pi Imager. |
+| `cluster apply` | Check every node is reachable and run base setup. |
+| `cluster status` | Which nodes are up, and the active mode. |
+| `cluster ssh <node> [cmd]` | Shell on a node (`cluster ssh 2` works). |
+| `cluster shutdown` | Power off every node (workers first). |
+| `cluster reset` | Remove everything pi-cluster installed; reboot. |
+| `cluster modes` | List modes. |
+| `cluster create <mode> [--demo]` | Set up a mode. |
+| `cluster switch <mode> [--demo]` | Replace the active mode. |
+| `cluster destroy` | Remove the active mode. |
+| `cluster demo` | Deploy the active mode's demo apps. |
+| `cluster kubeconfig` | Fetch the k3s kubeconfig. |
+| `cluster deploy [svc…]` | Build and deploy services from `cluster.toml`. |
+| `cluster undeploy [svc…] [--all]` | Stop and remove services. |
+| `cluster ps` | Services on every node. |
+| `cluster logs <svc> [-f]` | A service's logs from every node it runs on. |
+| `cluster lights install\|flash\|firmware` | LED helpers. |
 
 ## Troubleshooting
 
-- **Discovery finds nothing.** Check the Pis are powered and booted, and were
-  flashed with the public key printed by `cluster init`. If mDNS `.local` names
-  don't resolve on your network, force a subnet scan:
-  `cluster init --scan 192.168.1.0/24`.
-- **`ansible-playbook not found`.** Install it with `pip install ansible-core`.
-- **Wrong node numbering.** Edit `cluster-config.json` (roles and storage node)
-  and re-run `cluster apply`.
+- **Discovery finds nothing.** Check the Pis are booted and were flashed with
+  the key from `cluster pubkey`. If `.local` names don't resolve on your
+  network, scan instead: `cluster init --scan 192.168.1.0/24`.
+- **On WSL2.** WSL usually can't see `.local` names or your LAN subnet. Use
+  `--scan` with your LAN's subnet (run `ipconfig` in Windows to find it), or
+  enable `networkingMode=mirrored` in `.wslconfig`.
+- **A node shows DOWN.** `cluster ssh <node>` shows the raw SSH error.
+- **Wrong roles or storage node.** Edit `~/.config/pi-cluster/config.json`
+  (`storage.node: null` means no SSD) and re-run `cluster apply`.
+- **Deploy says the binary is x86.** Build for `aarch64-unknown-linux-musl`;
+  [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) is the easiest
+  way from Linux, macOS or WSL.
+- **Config location.** Set `PI_CLUSTER_HOME` to keep several clusters apart.
+
+## Contributing
+
+Development uses [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv sync                    # create .venv with pi-cluster + dev tools
+uv run cluster --help      # run the CLI from your checkout
+uv run pytest              # tests (including Ansible syntax checks)
+uv run ruff format .       # format
+uv run ruff check .        # lint
+uv run ty check            # type-check
+```
+
+CI runs all of these on every push and pull request.
+
+New modes are a folder of playbooks plus one registry entry; see
+[docs/adding-a-mode.md](docs/adding-a-mode.md).
+
+## Releasing
+
+The version lives in `pyproject.toml`. To release:
+
+```bash
+uv version --bump minor    # or patch / major, or e.g. `uv version 1.0.0`
+```
+
+Update `CHANGELOG.md`, then merge to `main`. The release workflow notices the
+new version, runs CI, publishes to PyPI, and tags the commit `vX.Y.Z` with a
+GitHub release. Merges that don't change the version don't release anything.
 
 ## License
 

@@ -1,0 +1,72 @@
+# Remove the kubernetes mode, leaving the nodes bare. The LED tool stays
+# (it's shared with your own services); `cluster reset` removes it too.
+- name: Remove k3s
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Uninstall the k3s server
+      ansible.builtin.command: /usr/local/bin/k3s-uninstall.sh
+      args:
+        removes: /usr/local/bin/k3s-uninstall.sh
+
+    - name: Uninstall the k3s agent
+      ansible.builtin.command: /usr/local/bin/k3s-agent-uninstall.sh
+      args:
+        removes: /usr/local/bin/k3s-agent-uninstall.sh
+
+    - name: Remove leftover config, manifests and image build storage
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/rancher/k3s
+        - /var/lib/pi-cluster/manifests
+        - /var/lib/pi-cluster/containers
+        - /var/lib/pi-cluster/operator-key
+
+- name: Unexport and unmount the SSD (its data is kept)
+  hosts: storage
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Remove the NFS export
+      ansible.builtin.blockinfile:
+        path: /etc/exports
+        marker: "# {mark} pi-cluster registry"
+        state: absent
+      failed_when: false
+      register: exports
+
+    - name: Reload NFS exports
+      ansible.builtin.command: exportfs -ra
+      when: exports is changed
+      failed_when: false
+      changed_when: true
+
+    - name: Unmount the SSD
+      ansible.builtin.shell: mountpoint -q {{ storage_mount }} && umount {{ storage_mount }} && echo unmounted || true
+      register: unmount
+      changed_when: "'unmounted' in unmount.stdout"
+
+    - name: Remove the SSD from /etc/fstab
+      ansible.builtin.blockinfile:
+        path: /etc/fstab
+        marker: "# {mark} pi-cluster ssd"
+        state: absent
+      register: fstab
+
+    - name: Reload systemd's view of fstab
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: fstab is changed
+
+- name: Remove packages the kubernetes mode installed
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Remove them
+      ansible.builtin.include_tasks: "{{ pi_cluster_data }}/tasks/apt-remove.yml"
+      vars:
+        component: kubernetes

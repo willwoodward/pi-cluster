@@ -1,0 +1,28 @@
+# Install apt packages and record the ones pi-cluster added, so `cluster destroy`
+# and `cluster reset` remove exactly those (and nothing you installed yourself).
+# Vars: packages (list), component (name of the mode / feature installing them).
+- name: Check which of {{ packages | join(', ') }} are already installed
+  ansible.builtin.command: dpkg-query -W -f=${Status} {{ item }}
+  loop: "{{ packages }}"
+  register: pi_cluster_pkg_state
+  check_mode: false
+  changed_when: false
+  failed_when: false
+
+- name: Install {{ packages | join(', ') }}
+  ansible.builtin.apt:
+    name: "{{ packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Record the packages pi-cluster installed
+  ansible.builtin.lineinfile:
+    path: "/var/lib/pi-cluster/packages/{{ component }}"
+    line: "{{ item.item }}"
+    create: true
+    mode: "0644"
+  loop: "{{ pi_cluster_pkg_state.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: "'install ok installed' not in item.stdout"

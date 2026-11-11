@@ -1,0 +1,71 @@
+# The LED operator: watches pods cluster-wide and flashes the node they land on.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pod-operator
+  namespace: pi-cluster
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pi-cluster-pod-operator
+rules:
+  # Read-only: watch pods, look up node IPs.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+  # kopf reports handler errors as Events.
+  - apiGroups: ["", "events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pi-cluster-pod-operator
+subjects:
+  - kind: ServiceAccount
+    name: pod-operator
+    namespace: pi-cluster
+roleRef:
+  kind: ClusterRole
+  name: pi-cluster-pod-operator
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pod-operator
+  namespace: pi-cluster
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pod-operator
+  template:
+    metadata:
+      labels:
+        app: pod-operator
+    spec:
+      serviceAccountName: pod-operator
+      containers:
+        - name: pod-operator
+          image: localhost:30007/pod-operator:latest
+          imagePullPolicy: Always
+          env:
+            - name: NODE_SSH_USER
+              value: "{{ ansible_user }}"
+            - name: SSH_KEY_PATH
+              value: /etc/pi-cluster/ssh/id
+          volumeMounts:
+            - name: ssh-key
+              mountPath: /etc/pi-cluster/ssh
+              readOnly: true
+      volumes:
+        - name: ssh-key
+          secret:
+            secretName: pod-operator-ssh-key
+            defaultMode: 0400

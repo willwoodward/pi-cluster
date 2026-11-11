@@ -1,0 +1,42 @@
+{% if use_nfs %}
+# Backed by the SSD, exported over NFS from {{ nfs_server }}.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: registry-pv
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: {{ nfs_server }}
+    path: {{ nfs_path }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: registry-pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  volumeName: registry-pv
+  resources:
+    requests:
+      storage: 100Gi
+{% else %}
+# No SSD configured: keep images on the node's own disk (k3s local-path).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: registry-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+{% endif %}

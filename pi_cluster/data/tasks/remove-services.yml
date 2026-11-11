@@ -1,0 +1,22 @@
+# Stop and delete pi-cluster services. Vars: service_names (list; ["*"] = all).
+# Names are validated by the CLI (lowercase letters, digits, dashes).
+- name: Stop and remove pi-cluster services ({{ service_names | join(', ') }})
+  ansible.builtin.shell: |
+    set -u
+    removed=0
+    for unit in {% for n in service_names %}/etc/systemd/system/pi-cluster-{{ n }}.service {% endfor %}; do
+      [ -e "$unit" ] || continue
+      name=$(basename "$unit" .service)
+      name=${name#pi-cluster-}
+      systemctl disable --now "pi-cluster-$name.service" || true
+      rm -f "$unit"
+      rm -rf "/opt/pi-cluster/$name"
+      echo "removed $name"
+      removed=1
+    done
+    systemctl daemon-reload
+    [ "$removed" = 1 ] || echo "nothing to remove"
+  args:
+    executable: /bin/bash
+  register: pi_cluster_removed
+  changed_when: "'removed ' in pi_cluster_removed.stdout"

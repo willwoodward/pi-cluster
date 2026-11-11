@@ -1,0 +1,11 @@
+[package]
+name = "hello-agent"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# No dependencies: just the standard library, so it cross-compiles anywhere.
+[dependencies]
+
+[profile.release]
+strip = true

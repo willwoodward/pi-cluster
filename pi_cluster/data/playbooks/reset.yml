@@ -1,0 +1,31 @@
+# Back to bare: undo every mode, service, tool and package pi-cluster added,
+# then reboot to clear leftover kernel state (iptables rules, interfaces,
+# modules). Base setup (hostname, cgroups) is kept.
+#
+# New modes: add their uninstall playbook here.
+- name: Remove the kubernetes mode
+  ansible.builtin.import_playbook: ../modes/kubernetes/uninstall.yml
+
+- name: Remove pi-cluster services, tools and packages
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Remove every deployed service
+      ansible.builtin.include_tasks: "{{ pi_cluster_data }}/tasks/remove-services.yml"
+      vars:
+        service_names: ["*"]
+
+    - name: Remove the cluster-led tool
+      ansible.builtin.file:
+        path: /usr/local/bin/cluster-led
+        state: absent
+
+    - name: Remove every package pi-cluster installed
+      ansible.builtin.include_tasks: "{{ pi_cluster_data }}/tasks/apt-remove.yml"
+      vars:
+        component: "*"
+
+    - name: Reboot
+      ansible.builtin.reboot:
+        reboot_timeout: 600

@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+
+# cluster-led: set the Neo Trinkey (https://www.adafruit.com/product/4870)
+# LEDs on this node over USB serial. Installed by `cluster lights install`.
+# The Trinkey needs the firmware from `cluster lights firmware` as its code.py.
+#
+#   cluster-led green          all four LEDs green
+#   cluster-led 13:red,5       LEDs 1 and 3 red at 50%
+#   cluster-led off            all off
+#
+# Run with '-h' for the full syntax. Set CLUSTER_LED_DEVICE if the Trinkey
+# isn't /dev/ttyACM0.
+
+import argparse
+import os
+import sys
+
+DEFAULT_BAUD = 115200
+DEFAULT_DEVICE = os.environ.get('CLUSTER_LED_DEVICE', '/dev/ttyACM0')
+
+
+COLOR_MAP = {
+    'red':     'red',
+    'yellow':  'yellow',
+    'orange':  'orange',
+    'green':   'green',
+    'teal':    'teal',
+    'cyan':    'cyan',
+    'blue':    'blue',
+    'purple':  'purple',
+    'magenta': 'magenta',
+    'white':   'white',
+    'black':   'black',
+    'off':     'black',
+    'gold':    'gold',
+    'pink':    'pink',
+    'aqua':    'aqua',
+    'jade':    'jade',
+    'amber':   'amber',
+    'oldlace': 'oldlace',
+}
+
+
+class NeoTrinkey:
+
+    def __init__(self, baud, device):
+        self.baud = baud
+        self.device = device
+
+    def send(self, command):
+        try:
+            import serial
+        except ImportError:
+            sys.exit('cluster-led: pyserial is missing (apt install python3-serial).')
+        if not os.path.exists(self.device):
+            sys.exit('cluster-led: no Trinkey at {} (is it plugged in?)'.format(self.device))
+        try:
+            with serial.Serial(self.device, baudrate=self.baud) as dev:
+                dev.write('{}\r'.format(command).encode())
+        except (serial.SerialException, PermissionError) as exc:
+            sys.exit('cluster-led: {} (is this user in the dialout group?)'.format(exc))
+
+
+def hcf(command, details=None):
+    print('Error with command "{}" '.format(command))
+    if details is None:
+        details = 'Please see help for details "-h".'
+
+    print(details)
+    sys.exit(1)
+
+
+def parse_commands(commands):
+    formatted = []
+    for command in commands:
+        formatted.append(parse_command(command))
+
+    return ','.join(formatted)
+
+
+def parse_command(command):
+    if command in COLOR_MAP.keys():
+        command = '1234:{}'.format(command)
+
+    parts = command.split(':')
+    if len(parts) != 2:
+        hcf(command)
+
+    leds, parts = parts
+    result_leds = ''
+
+    if leds == 'all':
+        leds = '1234'
+
+    for led in leds:
+        try:
+            led = int(led)
+        except ValueError:
+            hcf(command, details='Led must be a number from 1-4.')
+
+        if led < 1 or led > 4:
+            hcf(command, details='Led must be a number from 1-4.')
+
+        result_leds += str(led)
+
+    parts = parts.split(',')
+    if not parts:
+        hcf(command, details='Specify a color, intensity or both.')
+
+    result_color = ''
+    result_intensity = ''
+
+    for part in parts:
+        if part.isnumeric():
+            part = int(part)
+            if part < 0 or part > 10:
+                hcf(command, details='Intensity must be between 0 and 10.')
+
+            result_intensity = str(part)
+
+        elif part in COLOR_MAP.keys():
+            result_color = COLOR_MAP[part]
+        else:
+            colors = list(COLOR_MAP.keys())
+            colors.sort()
+            hcf(command, details=('Specify a color and/or intensity value.\n '
+                                  ' Valid colors are: {}'.format(', '.join(colors))))
+
+    return ':'.join([result_leds, result_color, result_intensity])
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Control Neo Trinkey LEDs (NeoPixels).',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--baud', type=int, default=DEFAULT_BAUD, help='Serial baud rate')
+    parser.add_argument('--device', type=str, default=DEFAULT_DEVICE, help='Serial device')
+    parser.add_argument(
+        'command', type=str, nargs='+',
+        help=('LED control commands such as "13:red,5" (leds:color,intensity). '
+              'Set LEDS 1 and 3 to red with 50%% intensity. '
+              'LEDs are values 1-4 or "all". Intensity is 0-10. '
+              'Type an invalid color to see a full list. '
+              'Intensity or color can be left unchanged "12:blue" "14:10". '
+              'Specify just a color to set all LEDs. '
+              'Commands are processed in the order received: '
+              '"black 12:red,10" will clear all LEDs then set 1 and 2 to red at full intensity.')
+    )
+    args = parser.parse_args()
+    neo_trinkey = NeoTrinkey(args.baud, args.device)
+    neo_trinkey.send(parse_commands(args.command))
+
+
+if __name__ == '__main__':
+    main()

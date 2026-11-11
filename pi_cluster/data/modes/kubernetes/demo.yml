@@ -1,0 +1,90 @@
+# Build the demo images on the control-plane (so they're ARM), push them to the
+# in-cluster registry, and roll out the LED operator and the Flask example.
+# Images are built with buildah: no daemon, and it leaves k3s's iptables alone.
+- name: Build and roll out the LED operator and Flask example
+  hosts: control_plane
+  become: true
+  gather_facts: false
+  vars:
+    manifest_dir: /var/lib/pi-cluster/manifests
+    registry: localhost:30007
+    buildah: buildah --root /var/lib/pi-cluster/containers --runroot /run/pi-cluster-containers
+    images:
+      - { name: pod-operator, context: pod-operator/app }
+      - { name: demo-flask, context: example-flask-api/app }
+  tasks:
+    - name: Install buildah
+      ansible.builtin.include_tasks: "{{ pi_cluster_data }}/tasks/apt-install.yml"
+      vars:
+        packages: [buildah]
+        component: kubernetes
+
+    - name: Copy the manifests and build contexts
+      ansible.builtin.copy:
+        src: "{{ pi_cluster_data }}/modes/kubernetes/manifests/"
+        dest: "{{ manifest_dir }}/"
+        mode: preserve
+
+    - name: Build and push the images
+      ansible.builtin.shell: |
+        set -euo pipefail
+        {{ buildah }} bud --layers -t {{ registry }}/{{ item.name }}:latest {{ manifest_dir }}/{{ item.context }}
+        {{ buildah }} push --tls-verify=false {{ registry }}/{{ item.name }}:latest
+      args:
+        executable: /bin/bash
+      loop: "{{ images }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: true
+
+    - name: Render the operator manifest
+      ansible.builtin.template:
+        src: "{{ pi_cluster_data }}/modes/kubernetes/manifests/pod-operator/operator.yml.j2"
+        dest: "{{ manifest_dir }}/pod-operator/operator.yml"
+        mode: "0644"
+
+    - name: Create the pi-cluster namespace
+      ansible.builtin.shell: |
+        set -o pipefail
+        k3s kubectl create namespace pi-cluster --dry-run=client -o yaml | k3s kubectl apply -f -
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Copy the cluster SSH key over (briefly) for the operator's Secret
+      ansible.builtin.copy:
+        src: "{{ ssh_private_key }}"
+        dest: /var/lib/pi-cluster/operator-key
+        mode: "0600"
+      no_log: true
+
+    - name: Create (or update) the operator's SSH key Secret
+      ansible.builtin.shell: |
+        set -o pipefail
+        k3s kubectl -n pi-cluster create secret generic pod-operator-ssh-key \
+          --from-file=id=/var/lib/pi-cluster/operator-key \
+          --dry-run=client -o yaml | k3s kubectl apply -f -
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Remove the key file from the node
+      ansible.builtin.file:
+        path: /var/lib/pi-cluster/operator-key
+        state: absent
+
+    - name: Apply the operator and the Flask example
+      ansible.builtin.command: >
+        k3s kubectl apply
+        -f {{ manifest_dir }}/pod-operator/operator.yml
+        -f {{ manifest_dir }}/example-flask-api/
+      changed_when: true
+
+    - name: Restart them so they pick up the freshly pushed images
+      ansible.builtin.command: "{{ item }}"
+      loop:
+        - k3s kubectl -n pi-cluster rollout restart deployment/pod-operator
+        - k3s kubectl rollout restart deployment/flask-demo
+        - k3s kubectl -n pi-cluster rollout status deployment/pod-operator --timeout=300s
+        - k3s kubectl rollout status deployment/flask-demo --timeout=300s
+      changed_when: true

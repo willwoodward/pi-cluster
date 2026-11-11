@@ -1,0 +1,19 @@
+# Deploy with `cluster deploy` from this folder. Needs cargo-zigbuild
+# (`cargo install cargo-zigbuild`, plus zig) and the aarch64 musl target
+# (`rustup target add aarch64-unknown-linux-musl`).
+
+[build]
+command = "cargo zigbuild --release --target aarch64-unknown-linux-musl"
+
+# One controller on the control-plane node ...
+[services.controller]
+binary = "target/aarch64-unknown-linux-musl/release/controller"
+on = "control-plane"
+args = ["--listen", "0.0.0.0:8080"]
+
+# ... and an agent on every worker, reporting in to it.
+[services.agent]
+binary = "target/aarch64-unknown-linux-musl/release/agent"
+on = "workers"
+args = ["--controller", "{{ control_plane }}:8080"]
+env = { NODE_NAME = "{{ node_name }}", HEARTBEAT_SECS = "5" }

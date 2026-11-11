@@ -1,0 +1,52 @@
+# The "bare" baseline every node is kept at. Modes and services layer on top;
+# `cluster reset` returns to exactly this.
+- name: Base setup for every node
+  hosts: all
+  become: true
+  tasks:
+    - name: Set the hostname to the node's name
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname }}"
+
+    - name: Keep /etc/hosts in sync with the hostname
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1\s'
+        line: "127.0.1.1\t{{ inventory_hostname }}"
+
+    - name: Create pi-cluster's directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - /var/lib/pi-cluster
+        - /var/lib/pi-cluster/packages
+        - /opt/pi-cluster
+
+    - name: Find the kernel command line
+      ansible.builtin.stat:
+        path: /boot/firmware/cmdline.txt
+      register: firmware_cmdline
+
+    - name: Pick the cmdline.txt location (Bookworm and later use /boot/firmware)
+      ansible.builtin.set_fact:
+        cmdline_path: "{{ '/boot/firmware/cmdline.txt' if firmware_cmdline.stat.exists else '/boot/cmdline.txt' }}"
+
+    - name: Check cmdline.txt exists (it won't on non-Pi hardware)
+      ansible.builtin.stat:
+        path: "{{ cmdline_path }}"
+      register: cmdline
+
+    - name: Enable the memory cgroup (k3s needs it, and so will your own cgroup experiments)
+      ansible.builtin.replace:
+        path: "{{ cmdline_path }}"
+        regexp: '^((?!.*\bcgroup_enable=memory\b).*\S)[ \t]*$'
+        replace: '\1 cgroup_memory=1 cgroup_enable=memory'
+      when: cmdline.stat.exists
+      register: cgroup_cmdline
+
+    - name: Reboot to apply the new kernel command line
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+      when: cgroup_cmdline is changed

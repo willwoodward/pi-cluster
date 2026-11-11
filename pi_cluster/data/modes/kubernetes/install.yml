@@ -1,0 +1,87 @@
+# Install k3s: the server on the control-plane, agents on the workers.
+- name: Point containerd at the in-cluster registry (before k3s starts, so no restart is needed)
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Create /etc/rancher/k3s
+      ansible.builtin.file:
+        path: /etc/rancher/k3s
+        state: directory
+        mode: "0755"
+
+    - name: Write registries.yaml
+      ansible.builtin.copy:
+        dest: /etc/rancher/k3s/registries.yaml
+        mode: "0644"
+        content: |
+          mirrors:
+            "localhost:30007":
+              endpoint:
+                - "http://localhost:30007"
+
+- name: Install the k3s server
+  hosts: control_plane
+  become: true
+  tasks:
+    - name: Install k3s (server)
+      ansible.builtin.shell: |
+        set -o pipefail
+        curl -sfL https://get.k3s.io | sh -s - server \
+          --write-kubeconfig-mode 644 \
+          --tls-san {{ ansible_host }} \
+          --tls-san {{ ansible_default_ipv4.address }}
+      args:
+        executable: /bin/bash
+        creates: /usr/local/bin/k3s
+
+    - name: Wait for the join token
+      ansible.builtin.wait_for:
+        path: /var/lib/rancher/k3s/server/node-token
+        timeout: 300
+
+    - name: Read the join token
+      ansible.builtin.slurp:
+        src: /var/lib/rancher/k3s/server/node-token
+      register: k3s_token_file
+
+    - name: Remember the token and server address for the workers
+      ansible.builtin.set_fact:
+        k3s_token: "{{ k3s_token_file.content | b64decode | trim }}"
+        k3s_server: "{{ ansible_default_ipv4.address }}"
+      no_log: true
+
+- name: Join the workers
+  hosts: workers
+  become: true
+  gather_facts: false
+  vars:
+    server: "{{ hostvars[groups['control_plane'][0]] }}"
+  tasks:
+    - name: Install k3s (agent)
+      ansible.builtin.shell: |
+        set -o pipefail
+        curl -sfL https://get.k3s.io | \
+          K3S_URL=https://{{ server.k3s_server }}:6443 \
+          K3S_TOKEN={{ server.k3s_token }} sh -s - agent
+      args:
+        executable: /bin/bash
+        creates: /usr/local/bin/k3s
+      no_log: true
+
+- name: Wait for the cluster
+  hosts: control_plane
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Wait for every node to register and be Ready
+      ansible.builtin.shell: |
+        set -o pipefail
+        for i in $(seq 1 60); do
+          [ "$(k3s kubectl get nodes --no-headers 2>/dev/null | wc -l)" -ge {{ groups['all'] | length }} ] && break
+          sleep 5
+        done
+        k3s kubectl wait --for=condition=Ready node --all --timeout=300s
+      args:
+        executable: /bin/bash
+      changed_when: false

@@ -1,0 +1,81 @@
+# Release on merge to main: if the version in pyproject.toml has no tag yet,
+# run CI, publish to PyPI, then tag the commit vX.Y.Z and create a GitHub
+# release. Pushes that don't change the version do nothing.
+#
+# To release:  uv version --bump minor   (or patch / major, or `uv version 1.0.0`)
+#              then merge to main.
+#
+# One-time setup:
+#   1. pypi.org -> your account -> Publishing -> add a pending "trusted publisher":
+#      owner willwoodward, repo pi-cluster, workflow release.yml, environment pypi.
+#   2. GitHub repo -> Settings -> Environments -> create an environment named `pypi`
+#      (optionally restrict it to the main branch / require your approval).
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # retry by hand if a release failed part-way
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check-version:
+    name: Is this a new version?
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need the tags
+      - uses: astral-sh/setup-uv@v6
+      - id: version
+        run: |
+          version=$(uv version --short)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "v$version is already tagged; nothing to release."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New version v$version: releasing."
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  ci:
+    name: CI
+    needs: check-version
+    if: needs.check-version.outputs.release == 'true'
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish v${{ needs.check-version.outputs.version }}
+    needs: [check-version, ci]
+    if: needs.check-version.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: write  # create the tag and GitHub release
+      id-token: write  # PyPI trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv build
+      - name: Publish to PyPI
+        # --check-url skips files already on PyPI, so a re-run after a failed tag step works
+        run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/
+      - name: Tag and create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          gh release create "v$VERSION" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "v$VERSION" \
+            --generate-notes

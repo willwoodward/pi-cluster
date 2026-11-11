@@ -1,0 +1,114 @@
+# Mount the SSD on the storage node and export it over NFS for the registry.
+# Skipped entirely when the cluster has no storage node.
+- name: Install the NFS client on every node
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Install nfs-common
+      ansible.builtin.include_tasks: "{{ pi_cluster_data }}/tasks/apt-install.yml"
+      vars:
+        packages: [nfs-common]
+        component: kubernetes
+
+- name: Mount the SSD and export it over NFS
+  hosts: storage
+  become: true
+  vars:
+    registry_path: "{{ storage_mount }}/registry"
+  tasks:
+    - name: Look for the SSD
+      ansible.builtin.stat:
+        path: "{{ storage_device }}"
+      register: ssd
+
+    - name: Stop if the SSD isn't there
+      ansible.builtin.fail:
+        msg: >-
+          {{ storage_device }} not found on {{ inventory_hostname }}. Attach the SSD,
+          fix storage.device in the cluster config, or set storage.node to null to
+          keep the registry on local storage instead.
+      when: not ssd.stat.exists
+
+    - name: See where (if anywhere) the SSD is already mounted
+      ansible.builtin.command: findmnt -n -o TARGET -S {{ storage_device }}
+      register: ssd_existing
+      changed_when: false
+      failed_when: false
+
+    - name: Stop if it's mounted somewhere else (e.g. the Pi boots from it)
+      ansible.builtin.fail:
+        msg: >-
+          {{ storage_device }} is already mounted at {{ ssd_existing.stdout | trim }}.
+          If this Pi boots from the SSD, point storage.device at a separate data
+          partition, or set storage.node to null.
+      when: ssd_existing.stdout | trim | length > 0 and (ssd_existing.stdout | trim) != storage_mount
+
+    - name: Read the SSD's filesystem UUID
+      ansible.builtin.command: blkid -s UUID -o value {{ storage_device }}
+      register: ssd_uuid
+      changed_when: false
+      failed_when: ssd_uuid.stdout | trim | length == 0
+
+    - name: Create the mount point
+      ansible.builtin.file:
+        path: "{{ storage_mount }}"
+        state: directory
+        mode: "0755"
+
+    - name: Add the SSD to /etc/fstab (nofail, so a missing SSD never blocks boot)
+      ansible.builtin.blockinfile:
+        path: /etc/fstab
+        marker: "# {mark} pi-cluster ssd"
+        block: "UUID={{ ssd_uuid.stdout | trim }} {{ storage_mount }} {{ storage_fstype }} defaults,nofail 0 2"
+      register: fstab
+
+    - name: Reload systemd's view of fstab
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: fstab is changed
+
+    - name: Check whether the SSD is mounted
+      ansible.builtin.command: mountpoint -q {{ storage_mount }}
+      register: ssd_mounted
+      changed_when: false
+      failed_when: false
+
+    - name: Mount the SSD
+      ansible.builtin.command: mount {{ storage_mount }}
+      when: ssd_mounted.rc != 0
+      changed_when: true
+
+    - name: Install the NFS server
+      ansible.builtin.include_tasks: "{{ pi_cluster_data }}/tasks/apt-install.yml"
+      vars:
+        packages: [nfs-kernel-server]
+        component: kubernetes
+
+    - name: Create the registry directory
+      ansible.builtin.file:
+        path: "{{ registry_path }}"
+        state: directory
+        mode: "0755"
+
+    - name: Export it to the local subnet only
+      ansible.builtin.blockinfile:
+        path: /etc/exports
+        marker: "# {mark} pi-cluster registry"
+        block: >-
+          {{ registry_path }}
+          {{ ansible_default_ipv4.network }}/{{ ansible_default_ipv4.netmask }}(rw,sync,no_subtree_check,no_root_squash)
+        create: true
+        mode: "0644"
+      notify: Reload NFS exports
+
+    - name: Start the NFS server
+      ansible.builtin.systemd:
+        name: nfs-server
+        state: started
+        enabled: true
+
+  handlers:
+    - name: Reload NFS exports
+      ansible.builtin.command: exportfs -ra
+      changed_when: true

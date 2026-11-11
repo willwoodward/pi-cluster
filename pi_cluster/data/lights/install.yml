@@ -1,0 +1,21 @@
+- name: Install the cluster-led tool on every node
+  hosts: all
+  become: true
+  tasks:
+    - name: Install pyserial
+      ansible.builtin.include_tasks: "{{ pi_cluster_data }}/tasks/apt-install.yml"
+      vars:
+        packages: [python3-serial]
+        component: lights
+
+    - name: Install cluster-led
+      ansible.builtin.copy:
+        src: "{{ pi_cluster_data }}/lights/cluster-led"
+        dest: /usr/local/bin/cluster-led
+        mode: "0755"
+
+    - name: Let the SSH user talk to the Trinkey's serial port
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
+        groups: dialout
+        append: true

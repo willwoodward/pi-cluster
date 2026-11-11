@@ -1,0 +1,7 @@
+- name: Remove pi-cluster services
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Remove the services
+      ansible.builtin.include_tasks: "{{ pi_cluster_data }}/tasks/remove-services.yml"
